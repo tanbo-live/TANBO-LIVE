@@ -1,0 +1,25 @@
+name: OVH Connection Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-ssh:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure SSH
+        env:
+          OVH_SSH_KEY: ${{ secrets.OVH_SSH_KEY }}
+          OVH_HOST: ${{ secrets.OVH_HOST }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$OVH_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "$OVH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Test OVH connection
+        env:
+          OVH_HOST: ${{ secrets.OVH_HOST }}
+          OVH_USER: ${{ secrets.OVH_USER }}
+        run: |
+          ssh -i ~/.ssh/id_ed25519 "$OVH_USER@$OVH_HOST" 'echo "GitHub connected to OVH"; hostname; whoami'
