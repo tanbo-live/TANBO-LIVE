@@ -8,7 +8,7 @@ on:
       - '.github/workflows/ovh-connection-test.yml'
 
 jobs:
-  test-ssh:
+  diagnose:
     runs-on: ubuntu-latest
     steps:
       - name: Configure SSH
@@ -21,9 +21,20 @@ jobs:
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -H "$OVH_HOST" >> ~/.ssh/known_hosts
 
-      - name: Test OVH connection
+      - name: Diagnose OVH live stack
         env:
           OVH_HOST: ${{ secrets.OVH_HOST }}
           OVH_USER: ${{ secrets.OVH_USER }}
         run: |
-          ssh -i ~/.ssh/id_ed25519 "$OVH_USER@$OVH_HOST" 'echo "GitHub connected to OVH"; hostname; whoami'
+          ssh -i ~/.ssh/id_ed25519 "$OVH_USER@$OVH_HOST" '
+            set +e
+            echo "=== HOST ==="; hostname; whoami
+            echo "=== PORTS ==="; sudo ss -lntup | grep -E ":(80|443|1935|1985|8080|8000)\\b" || true
+            echo "=== NGINX ==="; sudo nginx -T 2>&1 | sed -n "1,260p"
+            echo "=== PROCESSES ==="; ps aux | grep -Ei "[s]rs|[n]ginx"
+            echo "=== SYSTEMD ==="; systemctl --no-pager --full status nginx 2>&1 | tail -60; systemctl --no-pager --full status srs 2>&1 | tail -80
+            echo "=== LOCAL SRS API ==="; curl -sv --max-time 10 http://127.0.0.1:1985/api/v1/versions 2>&1
+            echo "=== LOCAL WHIP OPTIONS ==="; curl -sv --max-time 10 -X OPTIONS http://127.0.0.1:1985/rtc/v1/whip/ -H "Origin: https://live.tanbo.co.uk" -H "Access-Control-Request-Method: POST" 2>&1
+            echo "=== PUBLIC WHIP OPTIONS ==="; curl -skv --max-time 10 -X OPTIONS https://live.tanbo.co.uk/rtc/v1/whip/ -H "Origin: https://live.tanbo.co.uk" -H "Access-Control-Request-Method: POST" 2>&1
+            echo "=== SRS CONFIGS ==="; sudo find / -maxdepth 4 -type f \( -name "srs.conf" -o -name "*.conf" \) 2>/dev/null | grep -E "srs|/usr/local/srs" | head -40
+          '
