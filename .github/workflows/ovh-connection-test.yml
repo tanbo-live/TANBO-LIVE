@@ -5,7 +5,7 @@ on:
     branches: [main]
     paths: ['.github/workflows/ovh-connection-test.yml']
 jobs:
-  locate:
+  fix:
     runs-on: ubuntu-latest
     steps:
       - name: Configure SSH
@@ -17,19 +17,29 @@ jobs:
           printf '%s\n' "$OVH_SSH_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -H "$OVH_HOST" >> ~/.ssh/known_hosts
-      - name: Locate broadcast app
+      - name: Fix HLS routing
         env:
           OVH_HOST: ${{ secrets.OVH_HOST }}
           OVH_USER: ${{ secrets.OVH_USER }}
         run: |
           ssh -i ~/.ssh/id_ed25519 "$OVH_USER@$OVH_HOST" '
-            set +e
-            echo "=== NGINX ROOTS/PROXIES ==="
-            sudo nginx -T 2>/dev/null | grep -nE "server_name|root |alias |proxy_pass|location "
-            echo "=== WEB DIRECTORIES ==="
-            sudo find /var/www /opt /srv /home/ubuntu -maxdepth 4 -type f 2>/dev/null | head -300
-            echo "=== WHIP REFERENCES ==="
-            sudo grep -RniE "rtc/v1/whip|WHIP|Failed to fetch|Retry Preflight|Broadcast Error" /var/www /opt /srv /home/ubuntu 2>/dev/null | head -200
-            echo "=== CONTAINERS ==="
-            sudo docker ps --format "{{.Names}}|{{.Image}}|{{.Ports}}"
+            set -e
+            CONF=/etc/nginx/sites-available/default
+            sudo cp "$CONF" "$CONF.bak.$(date +%s)"
+            sudo python3 -c '"'"'
+p="/etc/nginx/sites-available/default"
+s=open(p).read()
+needle="    location / {\n        proxy_pass http://127.0.0.1:1985;"
+block="    location ^~ /live/ {\n        proxy_pass http://127.0.0.1:8080;\n        proxy_http_version 1.1;\n        proxy_set_header Host $host;\n        add_header Cache-Control no-cache always;\n        add_header Access-Control-Allow-Origin * always;\n    }\n\n"
+if "location ^~ /live/" not in s:
+    if needle not in s: raise SystemExit("Expected nginx location not found")
+    s=s.replace(needle,block+needle,1)
+    open(p,"w").write(s)
+'"'"'
+            sudo nginx -t
+            sudo systemctl reload nginx
+            echo "=== HLS ROUTE TEST ==="
+            curl -sk -D - https://live.tanbo.co.uk/live/tanbo-test.m3u8 -o /tmp/hls.body | head -20
+            echo "=== BODY ==="
+            head -20 /tmp/hls.body
           '
