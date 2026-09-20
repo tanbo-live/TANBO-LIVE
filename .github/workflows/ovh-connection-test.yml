@@ -5,7 +5,7 @@ on:
     branches: [main]
     paths: ['.github/workflows/ovh-connection-test.yml']
 jobs:
-  diagnose:
+  locate:
     runs-on: ubuntu-latest
     steps:
       - name: Configure SSH
@@ -17,23 +17,19 @@ jobs:
           printf '%s\n' "$OVH_SSH_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -H "$OVH_HOST" >> ~/.ssh/known_hosts
-      - name: Inspect SRS WebRTC
+      - name: Locate broadcast app
         env:
           OVH_HOST: ${{ secrets.OVH_HOST }}
           OVH_USER: ${{ secrets.OVH_USER }}
         run: |
           ssh -i ~/.ssh/id_ed25519 "$OVH_USER@$OVH_HOST" '
             set +e
-            echo "=== DOCKER ==="
-            sudo docker ps --no-trunc
-            echo "=== SRS CONTAINER CONFIG ==="
-            CID=$(sudo docker ps -q --filter publish=1985 | head -1)
-            echo "CID=$CID"
-            sudo docker inspect "$CID" --format "{{json .Config.Cmd}} {{json .Config.Env}} {{json .HostConfig.PortBindings}}"
-            echo "=== DOCKER.CONF ==="
-            sudo docker exec "$CID" sh -c "cat /usr/local/srs/conf/docker.conf 2>/dev/null || cat conf/docker.conf 2>/dev/null"
-            echo "=== SRS RECENT LOGS ==="
-            sudo docker logs --tail 200 "$CID" 2>&1
-            echo "=== FIREWALL ==="
-            sudo ufw status verbose || true
+            echo "=== NGINX ROOTS/PROXIES ==="
+            sudo nginx -T 2>/dev/null | grep -nE "server_name|root |alias |proxy_pass|location "
+            echo "=== WEB DIRECTORIES ==="
+            sudo find /var/www /opt /srv /home/ubuntu -maxdepth 4 -type f 2>/dev/null | head -300
+            echo "=== WHIP REFERENCES ==="
+            sudo grep -RniE "rtc/v1/whip|WHIP|Failed to fetch|Retry Preflight|Broadcast Error" /var/www /opt /srv /home/ubuntu 2>/dev/null | head -200
+            echo "=== CONTAINERS ==="
+            sudo docker ps --format "{{.Names}}|{{.Image}}|{{.Ports}}"
           '
