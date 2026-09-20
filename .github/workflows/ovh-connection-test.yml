@@ -2,8 +2,8 @@ name: OVH Connection Test
 on:
   workflow_dispatch:
   push:
-    branches: [main]
-    paths: ['.github/workflows/ovh-connection-test.yml']
+    branches:
+      - main
 jobs:
   fix:
     runs-on: ubuntu-latest
@@ -17,29 +17,26 @@ jobs:
           printf '%s\n' "$OVH_SSH_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -H "$OVH_HOST" >> ~/.ssh/known_hosts
-      - name: Fix HLS routing
+      - name: Fix and test HLS routing
         env:
           OVH_HOST: ${{ secrets.OVH_HOST }}
           OVH_USER: ${{ secrets.OVH_USER }}
         run: |
-          ssh -i ~/.ssh/id_ed25519 "$OVH_USER@$OVH_HOST" '
-            set -e
-            CONF=/etc/nginx/sites-available/default
-            sudo cp "$CONF" "$CONF.bak.$(date +%s)"
-            sudo python3 -c '"'"'
-p="/etc/nginx/sites-available/default"
-s=open(p).read()
-needle="    location / {\n        proxy_pass http://127.0.0.1:1985;"
-block="    location ^~ /live/ {\n        proxy_pass http://127.0.0.1:8080;\n        proxy_http_version 1.1;\n        proxy_set_header Host $host;\n        add_header Cache-Control no-cache always;\n        add_header Access-Control-Allow-Origin * always;\n    }\n\n"
-if "location ^~ /live/" not in s:
-    if needle not in s: raise SystemExit("Expected nginx location not found")
-    s=s.replace(needle,block+needle,1)
-    open(p,"w").write(s)
-'"'"'
-            sudo nginx -t
-            sudo systemctl reload nginx
-            echo "=== HLS ROUTE TEST ==="
-            curl -sk -D - https://live.tanbo.co.uk/live/tanbo-test.m3u8 -o /tmp/hls.body | head -20
-            echo "=== BODY ==="
-            head -20 /tmp/hls.body
-          '
+          ssh -i ~/.ssh/id_ed25519 "$OVH_USER@$OVH_HOST" "sudo bash -s" <<'REMOTE'
+          set -e
+          CONF=/etc/nginx/sites-available/default
+          cp "$CONF" "$CONF.bak"
+          if ! grep -q 'location ^~ /live/' "$CONF"; then
+            sed -i '/^[[:space:]]*location \/ {/i\    location ^~ /live/ {\n        proxy_pass http://127.0.0.1:8080;\n        proxy_http_version 1.1;\n        add_header Cache-Control "no-cache" always;\n        add_header Access-Control-Allow-Origin "*" always;\n    }\n' "$CONF"
+          fi
+          nginx -t
+          systemctl reload nginx
+          echo "=== DIRECT SRS HLS ==="
+          curl -sS -D /tmp/direct.headers -o /tmp/direct.body http://127.0.0.1:8080/live/tanbo-test.m3u8 || true
+          head -20 /tmp/direct.headers
+          head -10 /tmp/direct.body
+          echo "=== PUBLIC HLS ==="
+          curl -skS -D /tmp/public.headers -o /tmp/public.body https://live.tanbo.co.uk/live/tanbo-test.m3u8 || true
+          head -20 /tmp/public.headers
+          head -10 /tmp/public.body
+          REMOTE
