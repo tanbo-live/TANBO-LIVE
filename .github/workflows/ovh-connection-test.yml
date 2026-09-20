@@ -1,12 +1,9 @@
 name: OVH Connection Test
-
 on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths:
-      - '.github/workflows/ovh-connection-test.yml'
-
+    paths: ['.github/workflows/ovh-connection-test.yml']
 jobs:
   diagnose:
     runs-on: ubuntu-latest
@@ -20,21 +17,23 @@ jobs:
           printf '%s\n' "$OVH_SSH_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -H "$OVH_HOST" >> ~/.ssh/known_hosts
-
-      - name: Diagnose OVH live stack
+      - name: Inspect SRS WebRTC
         env:
           OVH_HOST: ${{ secrets.OVH_HOST }}
           OVH_USER: ${{ secrets.OVH_USER }}
         run: |
           ssh -i ~/.ssh/id_ed25519 "$OVH_USER@$OVH_HOST" '
             set +e
-            echo "=== HOST ==="; hostname; whoami
-            echo "=== PORTS ==="; sudo ss -lntup | grep -E ":(80|443|1935|1985|8080|8000)\\b" || true
-            echo "=== NGINX ==="; sudo nginx -T 2>&1 | sed -n "1,260p"
-            echo "=== PROCESSES ==="; ps aux | grep -Ei "[s]rs|[n]ginx"
-            echo "=== SYSTEMD ==="; systemctl --no-pager --full status nginx 2>&1 | tail -60; systemctl --no-pager --full status srs 2>&1 | tail -80
-            echo "=== LOCAL SRS API ==="; curl -sv --max-time 10 http://127.0.0.1:1985/api/v1/versions 2>&1
-            echo "=== LOCAL WHIP OPTIONS ==="; curl -sv --max-time 10 -X OPTIONS http://127.0.0.1:1985/rtc/v1/whip/ -H "Origin: https://live.tanbo.co.uk" -H "Access-Control-Request-Method: POST" 2>&1
-            echo "=== PUBLIC WHIP OPTIONS ==="; curl -skv --max-time 10 -X OPTIONS https://live.tanbo.co.uk/rtc/v1/whip/ -H "Origin: https://live.tanbo.co.uk" -H "Access-Control-Request-Method: POST" 2>&1
-            echo "=== SRS CONFIGS ==="; sudo find / -maxdepth 4 -type f \( -name "srs.conf" -o -name "*.conf" \) 2>/dev/null | grep -E "srs|/usr/local/srs" | head -40
+            echo "=== DOCKER ==="
+            sudo docker ps --no-trunc
+            echo "=== SRS CONTAINER CONFIG ==="
+            CID=$(sudo docker ps -q --filter publish=1985 | head -1)
+            echo "CID=$CID"
+            sudo docker inspect "$CID" --format "{{json .Config.Cmd}} {{json .Config.Env}} {{json .HostConfig.PortBindings}}"
+            echo "=== DOCKER.CONF ==="
+            sudo docker exec "$CID" sh -c "cat /usr/local/srs/conf/docker.conf 2>/dev/null || cat conf/docker.conf 2>/dev/null"
+            echo "=== SRS RECENT LOGS ==="
+            sudo docker logs --tail 200 "$CID" 2>&1
+            echo "=== FIREWALL ==="
+            sudo ufw status verbose || true
           '
