@@ -32,3 +32,5 @@ jobs:
           echo SRS_LOG
           docker logs --tail 80 srs 2>&1
           REMOTE
+
+# live-check-2
