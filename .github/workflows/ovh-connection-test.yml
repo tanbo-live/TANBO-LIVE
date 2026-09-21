@@ -2,10 +2,9 @@ name: OVH Connection Test
 on:
   workflow_dispatch:
   push:
-    branches:
-      - main
+    branches: [main]
 jobs:
-  diagnose:
+  fix:
     runs-on: ubuntu-latest
     steps:
       - name: Configure SSH
@@ -17,19 +16,28 @@ jobs:
           printf '%s\n' "$OVH_SSH_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -H "$OVH_HOST" >> ~/.ssh/known_hosts
-      - name: Diagnose active nginx and WHIP
+      - name: Repair SRS service and verify routes
         env:
           OVH_HOST: ${{ secrets.OVH_HOST }}
           OVH_USER: ${{ secrets.OVH_USER }}
         run: |
           ssh -i ~/.ssh/id_ed25519 "$OVH_USER@$OVH_HOST" "sudo bash -s" <<'REMOTE'
           set -e
-          echo "=== ACTIVE NGINX CONFIG ==="
-          nginx -T 2>&1 | grep -n -E 'server_name|listen 443|location|proxy_pass' || true
-          echo "=== WHIP OPTIONS ==="
-          curl -sk -i -X OPTIONS 'https://live.tanbo.co.uk/rtc/v1/whip/?app=live&stream=tanbo-test' -H 'Origin: https://clearcut-simple-service.replit.app' -H 'Access-Control-Request-Method: POST' -H 'Access-Control-Request-Headers: content-type' || true
-          echo "=== WHIP POST ==="
-          curl -sk -i -X POST 'https://live.tanbo.co.uk/rtc/v1/whip/?app=live&stream=tanbo-test' -H 'Origin: https://clearcut-simple-service.replit.app' -H 'Content-Type: application/sdp' --data-binary $'v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n' || true
-          echo "=== PUBLIC HLS ==="
-          curl -sk -i 'https://live.tanbo.co.uk/live/tanbo-test.m3u8' || true
+          echo "=== BEFORE ==="
+          docker ps -a --filter name=srs
+          docker logs --tail 80 srs 2>&1 || true
+          echo "=== RESTART SRS ==="
+          docker restart srs
+          sleep 3
+          docker ps --filter name=srs
+          echo "=== DIRECT API ==="
+          curl -fsS http://127.0.0.1:1985/api/v1/versions
+          echo
+          echo "=== PUBLIC WHIP OPTIONS ==="
+          curl -skS -D /tmp/h -o /dev/null -X OPTIONS 'https://live.tanbo.co.uk/rtc/v1/whip/?app=live&stream=tanbo-test' -H 'Origin: https://clearcut-simple-service.replit.app' -H 'Access-Control-Request-Method: POST' -H 'Access-Control-Request-Headers: content-type'
+          cat /tmp/h
+          echo "=== HLS ROUTE ==="
+          code=$(curl -skS -o /tmp/hls -w '%{http_code}' 'https://live.tanbo.co.uk/live/tanbo-test.m3u8')
+          echo "HTTP $code"
+          cat /tmp/hls
           REMOTE
