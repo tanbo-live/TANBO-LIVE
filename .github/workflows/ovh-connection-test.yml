@@ -1,10 +1,10 @@
-name: OVH SRS Config Inspect
+name: OVH SRS Root Fix
 on:
   workflow_dispatch:
   push:
     branches: [main]
 jobs:
-  inspect:
+  repair:
     runs-on: ubuntu-latest
     steps:
       - name: Configure SSH
@@ -16,19 +16,59 @@ jobs:
           printf '%s\n' "$OVH_SSH_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -H "$OVH_HOST" >> ~/.ssh/known_hosts
-      - name: Inspect effective SRS config only
+      - name: Install persistent SRS config and restart once
         env:
           OVH_HOST: ${{ secrets.OVH_HOST }}
           OVH_USER: ${{ secrets.OVH_USER }}
         run: |
           ssh -i ~/.ssh/id_ed25519 "$OVH_USER@$OVH_HOST" "sudo bash -s" <<'REMOTE'
-          echo SRS_COMMAND
-          docker inspect srs --format 'Cmd={{json .Config.Cmd}} Image={{.Config.Image}}'
-          echo RTC_CONF
-          docker exec srs cat conf/rtc.conf
-          echo STREAM_API
-          curl -sS http://127.0.0.1:1985/api/v1/streams/
+          set -euo pipefail
+          PUBLIC_IP="51.89.224.80"
+          IMAGE=$(docker inspect srs --format '{{.Config.Image}}')
+          mkdir -p /opt/srs
+          cat >/opt/srs/tanbo.conf <<'CONF'
+          listen              1935;
+          max_connections     1000;
+          srs_log_tank        console;
+          daemon              off;
+          http_api {
+              enabled         on;
+              listen          1985;
+          }
+          http_server {
+              enabled         on;
+              listen          8080;
+              dir             ./objs/nginx/html;
+          }
+          rtc_server {
+              enabled on;
+              listen 8000;
+              candidate $CANDIDATE;
+          }
+          vhost __defaultVhost__ {
+              hls {
+                  enabled on;
+              }
+              http_remux {
+                  enabled on;
+                  mount [vhost]/[app]/[stream].flv;
+              }
+              rtc {
+                  enabled on;
+                  rtmp_to_rtc on;
+                  rtc_to_rtmp on;
+              }
+          }
+          CONF
+          docker run --rm -e CANDIDATE="$PUBLIC_IP" -v /opt/srs/tanbo.conf:/usr/local/srs/conf/tanbo.conf:ro "$IMAGE" ./objs/srs -t -c conf/tanbo.conf
+          docker rm -f srs
+          docker run -d --name srs --restart unless-stopped             -e CANDIDATE="$PUBLIC_IP"             -v /opt/srs/tanbo.conf:/usr/local/srs/conf/tanbo.conf:ro             -p 1935:1935 -p 1985:1985 -p 8080:8080 -p 8000:8000/udp             "$IMAGE" ./objs/srs -c conf/tanbo.conf
+          sleep 3
+          echo CONFIG
+          docker exec srs cat conf/tanbo.conf
+          echo VERSION
+          curl -fsS http://127.0.0.1:1985/api/v1/versions
           echo
-          echo HLS_STATUS
-          curl -sS -o /tmp/hls -w '%{http_code}\n' http://127.0.0.1:8080/live/tanbo-test.m3u8
+          echo PORTS
+          docker inspect srs --format 'Status={{.State.Status}} Cmd={{json .Config.Cmd}} Ports={{json .HostConfig.PortBindings}}'
           REMOTE
