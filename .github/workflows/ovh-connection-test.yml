@@ -1,10 +1,10 @@
-name: OVH HLS CORS Deep Inspect
+name: OVH Live Pipeline Verify
 on:
   workflow_dispatch:
   push:
     branches: [main]
 jobs:
-  inspect:
+  verify:
     runs-on: ubuntu-latest
     steps:
       - name: Configure SSH
@@ -16,18 +16,19 @@ jobs:
           printf '%s\n' "$OVH_SSH_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -H "$OVH_HOST" >> ~/.ssh/known_hosts
-      - name: Inspect all header sources read only
+      - name: Verify live pipeline read only
         env:
           OVH_HOST: ${{ secrets.OVH_HOST }}
           OVH_USER: ${{ secrets.OVH_USER }}
         run: |
           ssh -i ~/.ssh/id_ed25519 "$OVH_USER@$OVH_HOST" "sudo bash -s" <<'REMOTE'
-          echo NGINX_ALL_CORS
-          nginx -T 2>&1 | grep -ni -B3 -A3 'access-control' || true
-          echo ALL_ETC_CORS
-          grep -Rni 'Access-Control-Allow-Origin' /etc/nginx 2>/dev/null || true
-          echo RESPONSE_HEADERS_VERBOSE
-          curl -skv -H 'Origin: https://clearcut-simple-service.replit.app' https://live.tanbo.co.uk/live/tanbo-test.m3u8 -o /dev/null 2>&1 | grep -iE '< HTTP|< access-control|< server:|Connected to|issuer:|subject:' || true
-          echo DNS
-          getent ahostsv4 live.tanbo.co.uk || true
+          echo STREAM_API
+          curl -sS http://127.0.0.1:1985/api/v1/streams/ || true
+          echo
+          echo HLS_STATUS
+          curl -sS -o /tmp/tanbo-hls -w '%{http_code}\n' http://127.0.0.1:8080/live/tanbo-test.m3u8 || true
+          echo HLS_BODY
+          head -20 /tmp/tanbo-hls 2>/dev/null || true
+          echo SRS_LOG_TAIL
+          docker logs --tail 80 srs 2>&1 || true
           REMOTE
