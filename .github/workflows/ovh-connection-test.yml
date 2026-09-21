@@ -35,3 +35,5 @@ jobs:
           echo SRS_LOG
           docker logs --tail 100 srs 2>&1
           REMOTE
+
+# read-only-live-check-2
