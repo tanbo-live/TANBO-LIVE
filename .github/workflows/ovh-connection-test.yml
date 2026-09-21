@@ -39,3 +39,5 @@ jobs:
           ss -lunp | grep ':8000' || true
           docker logs --tail 60 srs 2>&1
           REMOTE
+
+# verify-live-after-public-candidate
