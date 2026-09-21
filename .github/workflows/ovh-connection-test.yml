@@ -1,10 +1,10 @@
-name: OVH HLS CORS Root Fix
+name: OVH Nginx CORS Inspect
 on:
   workflow_dispatch:
   push:
     branches: [main]
 jobs:
-  repair:
+  inspect:
     runs-on: ubuntu-latest
     steps:
       - name: Configure SSH
@@ -16,19 +16,16 @@ jobs:
           printf '%s\n' "$OVH_SSH_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -H "$OVH_HOST" >> ~/.ssh/known_hosts
-      - name: Remove duplicate HLS CORS at nginx and verify
+      - name: Locate nginx config read only
         env:
           OVH_HOST: ${{ secrets.OVH_HOST }}
           OVH_USER: ${{ secrets.OVH_USER }}
         run: |
           ssh -i ~/.ssh/id_ed25519 "$OVH_USER@$OVH_HOST" "sudo bash -s" <<'REMOTE'
-          set -euo pipefail
-          cp /etc/nginx/sites-available/live.tanbo.co.uk /etc/nginx/sites-available/live.tanbo.co.uk.bak-cors
-          sed -i '/add_header Access-Control-Allow-Origin "\*" always;/d' /etc/nginx/sites-available/live.tanbo.co.uk
-          nginx -t
-          systemctl reload nginx
-          echo NGINX_HLS_BLOCK
-          grep -A12 -B2 'location.*live/' /etc/nginx/sites-available/live.tanbo.co.uk || true
-          echo PUBLIC_HEADERS
-          curl -sSI -H 'Origin: https://clearcut-simple-service.replit.app' https://live.tanbo.co.uk/live/tanbo-test.m3u8
+          set -e
+          nginx -T 2>&1 | grep -n -B4 -A14 'server_name live.tanbo.co.uk' || true
+          echo CORS_LINES
+          nginx -T 2>&1 | grep -n 'Access-Control-Allow-Origin' || true
+          echo CONFIG_FILES
+          grep -RIl 'server_name live.tanbo.co.uk' /etc/nginx 2>/dev/null || true
           REMOTE
