@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
 jobs:
-  fix:
+  inspect:
     runs-on: ubuntu-latest
     steps:
       - name: Configure SSH
@@ -16,28 +16,19 @@ jobs:
           printf '%s\n' "$OVH_SSH_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -H "$OVH_HOST" >> ~/.ssh/known_hosts
-      - name: Repair SRS service and verify routes
+      - name: Inspect stream and HLS
         env:
           OVH_HOST: ${{ secrets.OVH_HOST }}
           OVH_USER: ${{ secrets.OVH_USER }}
         run: |
           ssh -i ~/.ssh/id_ed25519 "$OVH_USER@$OVH_HOST" "sudo bash -s" <<'REMOTE'
-          set -e
-          echo "=== BEFORE ==="
-          docker ps -a --filter name=srs
-          docker logs --tail 80 srs 2>&1 || true
-          echo "=== RESTART SRS ==="
-          docker restart srs
-          sleep 3
-          docker ps --filter name=srs
-          echo "=== DIRECT API ==="
-          curl -fsS http://127.0.0.1:1985/api/v1/versions
+          echo STREAM_API
+          curl -sS http://127.0.0.1:1985/api/v1/streams/
           echo
-          echo "=== PUBLIC WHIP OPTIONS ==="
-          curl -skS -D /tmp/h -o /dev/null -X OPTIONS 'https://live.tanbo.co.uk/rtc/v1/whip/?app=live&stream=tanbo-test' -H 'Origin: https://clearcut-simple-service.replit.app' -H 'Access-Control-Request-Method: POST' -H 'Access-Control-Request-Headers: content-type'
-          cat /tmp/h
-          echo "=== HLS ROUTE ==="
-          code=$(curl -skS -o /tmp/hls -w '%{http_code}' 'https://live.tanbo.co.uk/live/tanbo-test.m3u8')
-          echo "HTTP $code"
-          cat /tmp/hls
+          echo HLS_STATUS
+          curl -sS -o /tmp/hls -w '%{http_code}\n' http://127.0.0.1:8080/live/tanbo-test.m3u8
+          head -20 /tmp/hls
+          echo
+          echo SRS_LOG
+          docker logs --tail 80 srs 2>&1
           REMOTE
