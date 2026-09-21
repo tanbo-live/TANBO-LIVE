@@ -22,6 +22,10 @@ jobs:
           OVH_USER: ${{ secrets.OVH_USER }}
         run: |
           ssh -i ~/.ssh/id_ed25519 "$OVH_USER@$OVH_HOST" "sudo bash -s" <<'REMOTE'
+          echo ENV_CANDIDATE
+          docker inspect srs --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -E 'CANDIDATE|SRS_RTC' || true
+          echo CONFIG
+          docker exec srs sh -c "grep -n -A8 -B2 'rtc_server' /usr/local/srs/conf/docker.conf 2>/dev/null || grep -n -A8 -B2 'rtc_server' /usr/local/srs/conf/*.conf 2>/dev/null || true"
           echo STREAM_API
           curl -sS http://127.0.0.1:1985/api/v1/streams/
           echo
