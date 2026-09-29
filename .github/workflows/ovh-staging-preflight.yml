@@ -39,10 +39,15 @@ jobs:
 import pathlib,re,sys
 p=pathlib.Path(sys.argv[1]); gw=sys.argv[2]
 s=p.read_text()
-new,n=re.subn(r'ThreadingHTTPServer\(\(\s*["\x27]127\.0\.0\.1["\x27]\s*,\s*19090\s*\)', f'ThreadingHTTPServer(("{gw}", 19090)', s, count=1)
-if n != 1:
-    raise SystemExit("expected exactly one loopback relay bind")
-p.write_text(new)
+desired=f'ThreadingHTTPServer(("{gw}", 19090)'
+if desired in s:
+    print("relay_bind_already_correct=true")
+else:
+    new,n=re.subn(r'ThreadingHTTPServer\(\(\s*["\x27]127\.0\.0\.1["\x27]\s*,\s*19090\s*\)', desired, s, count=1)
+    if n != 1:
+        raise SystemExit("relay bind is neither loopback nor expected staging gateway; refusing to guess")
+    p.write_text(new)
+    print("relay_bind_updated=true")
 PY
           python3 -m py_compile "$relay"
           systemctl daemon-reload
@@ -54,7 +59,9 @@ PY
 
           cfg=/opt/srs-staging/tanbo-staging.conf
           cp -a "$cfg" "$cfg.bak-before-relay-gateway"
-          sed -i "s#http://127\.0\.0\.1:19090/#http://$gateway:19090/#g" "$cfg"
+          if grep -q 'http://127\.0\.0\.1:19090/' "$cfg"; then
+            sed -i "s#http://127\.0\.0\.1:19090/#http://$gateway:19090/#g" "$cfg"
+          fi
           grep -q "on_publish http://$gateway:19090/on-publish" "$cfg"
           grep -q "on_unpublish http://$gateway:19090/on-unpublish" "$cfg"
 
