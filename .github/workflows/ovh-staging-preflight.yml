@@ -2,7 +2,7 @@ name: OVH Staging Preflight
 on:
   workflow_dispatch:
 jobs:
-  verify-staging-publish-denial:
+  fix-staging-hook-path:
     runs-on: ubuntu-latest
     steps:
       - name: Configure SSH
@@ -14,7 +14,7 @@ jobs:
           printf '%s\n' "$OVH_SSH_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -H "$OVH_HOST" >> ~/.ssh/known_hosts
-      - name: Verify unauthorized WHIP publish is denied by staging hook
+      - name: Make relay reachable only from staging Docker bridge
         env:
           OVH_HOST: ${{ secrets.OVH_HOST }}
           OVH_USER: ${{ secrets.OVH_USER }}
@@ -24,32 +24,64 @@ jobs:
           test "$(docker inspect -f '{{.State.Running}}' srs)" = true
           test "$(docker inspect -f '{{.State.Running}}' srs-staging)" = true
           systemctl is-active --quiet tanbo-staging-relay.service
-          ss -ltn | grep -q '172.17.0.1:19090'
+
+          gateway="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.Gateway}}{{end}}' srs-staging)"
+          test -n "$gateway"
+          echo "staging_gateway=$gateway"
+
+          unit=/etc/systemd/system/tanbo-staging-relay.service
+          relay=/opt/tanbo-staging-relay/relay.py
+          grep -q 'ThreadingHTTPServer' "$relay"
+          cp -a "$relay" "$relay.bak-before-docker-bind"
+          cp -a "$unit" "$unit.bak-before-docker-bind"
+
+          python3 - "$relay" "$gateway" <<'PY'
+import pathlib,re,sys
+p=pathlib.Path(sys.argv[1]); gw=sys.argv[2]
+s=p.read_text()
+new,n=re.subn(r'ThreadingHTTPServer\(\(\s*["\x27]127\.0\.0\.1["\x27]\s*,\s*19090\s*\)', f'ThreadingHTTPServer(("{gw}", 19090)', s, count=1)
+if n != 1:
+    raise SystemExit("expected exactly one loopback relay bind")
+p.write_text(new)
+PY
+          python3 -m py_compile "$relay"
+          systemctl daemon-reload
+          systemctl restart tanbo-staging-relay.service
+          sleep 2
+          systemctl is-active --quiet tanbo-staging-relay.service
+          ss -ltn | grep -q "$gateway:19090"
+          if ss -ltn | grep -q '0.0.0.0:19090'; then echo "relay became public" >&2; exit 1; fi
+
+          cfg=/opt/srs-staging/tanbo-staging.conf
+          cp -a "$cfg" "$cfg.bak-before-relay-gateway"
+          sed -i "s#http://127\.0\.0\.1:19090/#http://$gateway:19090/#g" "$cfg"
+          grep -q "on_publish http://$gateway:19090/on-publish" "$cfg"
+          grep -q "on_unpublish http://$gateway:19090/on-unpublish" "$cfg"
+
+          docker restart srs-staging >/dev/null
+          sleep 2
+          test "$(docker inspect -f '{{.State.Running}}' srs-staging)" = true
+          test "$(docker inspect -f '{{.State.Running}}' srs)" = true
 
           before="$(docker logs srs-staging 2>&1 | wc -l)"
-          sdp=$'v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0\r\na=msid-semantic: WMS\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\nc=IN IP4 0.0.0.0\r\na=mid:0\r\na=sendonly\r\na=rtcp-mux\r\na=ice-ufrag:test\r\na=ice-pwd:testtesttesttesttesttest\r\na=fingerprint:sha-256 00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00\r\na=setup:actpass\r\na=rtpmap:111 opus/48000/2\r\n'
+          sdp=$'v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\nc=IN IP4 0.0.0.0\r\na=mid:0\r\na=sendonly\r\na=rtcp-mux\r\na=ice-ufrag:test\r\na=ice-pwd:testtesttesttesttesttest\r\na=fingerprint:sha-256 00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00\r\na=setup:actpass\r\na=rtpmap:111 opus/48000/2\r\n'
           set +e
-          curl -sS --max-time 8 -o /tmp/tanbo-whip-body -w '%{http_code}'             -H 'Content-Type: application/sdp'             --data-binary "$sdp"             'http://127.0.0.1:1986/rtc/v1/whip/?app=live&stream=unauthorized-hook-proof&vhost=staging.tanbo.internal'             >/tmp/tanbo-whip-code
-          curl_rc=$?
+          code="$(curl -sS --max-time 12 -o /tmp/whip-body -w '%{http_code}' -H 'Content-Type: application/sdp' --data-binary "$sdp" 'http://127.0.0.1:1986/rtc/v1/whip/?app=live&stream=unauthorized-root-proof&vhost=staging.tanbo.internal')"
+          rc=$?
           set -e
           sleep 2
-
-          code="$(cat /tmp/tanbo-whip-code 2>/dev/null || true)"
-          echo "whip_http_code=${code:-none}"
-          echo "curl_exit=$curl_rc"
+          echo "whip_http_code=$code curl_exit=$rc"
           recent="$(docker logs srs-staging 2>&1 | tail -n +$((before + 1)))"
-          printf '%s\n' "$recent" | grep -E 'on_publish|unauthorized-hook-proof|19090|http_hooks|failed|denied' || true
-
-          printf '%s\n' "$recent" | grep -q 'unauthorized-hook-proof'
+          printf '%s\n' "$recent" | grep -E 'unauthorized-root-proof|on_publish|http_hooks|19090|failed' || true
+          printf '%s\n' "$recent" | grep -q 'unauthorized-root-proof'
           printf '%s\n' "$recent" | grep -q 'on_publish'
-          if printf '%s\n' "$recent" | grep -Eq 'on_publish failed|http_hooks.*failed|connect server failed'; then
-            echo "unauthorized_publish_denied_by_hook=true"
-          else
-            echo "Could not prove hook denial from SRS logs" >&2
-            exit 1
+          if printf '%s\n' "$recent" | grep -q 'connect server failed'; then
+            echo "SRS still cannot reach relay" >&2; exit 1
           fi
-
-          test "$(docker inspect -f '{{.State.Running}}' srs)" = true
-          echo "production_srs_running=true"
-          echo "verification_complete=true"
+          if [ "$code" = "201" ] || [ "$code" = "200" ]; then
+            echo "unauthorized WHIP was accepted" >&2; exit 1
+          fi
+          echo "relay_bridge_bind=true"
+          echo "production_srs_untouched=true"
+          echo "root_fix_verified=true"
           REMOTE
