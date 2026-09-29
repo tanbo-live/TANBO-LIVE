@@ -2,7 +2,7 @@ name: OVH Staging Preflight
 on:
   workflow_dispatch:
 jobs:
-  staging-hooks:
+  staging-auth-test:
     runs-on: ubuntu-latest
     steps:
       - name: Configure SSH
@@ -14,7 +14,7 @@ jobs:
           printf '%s\n' "$OVH_SSH_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -H "$OVH_HOST" >> ~/.ssh/known_hosts
-      - name: Enable hooks on isolated staging SRS
+      - name: Verify staging hooks fail closed
         env:
           OVH_HOST: ${{ secrets.OVH_HOST }}
           OVH_USER: ${{ secrets.OVH_USER }}
@@ -24,36 +24,14 @@ jobs:
           test "$(docker inspect -f '{{.State.Running}}' srs)" = true
           test "$(docker inspect -f '{{.State.Running}}' srs-staging)" = true
           systemctl is-active --quiet tanbo-staging-relay.service
+          code=$(curl -sS -o /tmp/tanbo-hook-test.out -w '%{http_code}' -H 'Content-Type: application/json' --data '{"action":"on_publish","vhost":"staging.tanbo.internal","app":"live","stream":"unauthorized-staging-probe","client_id":"probe"}' http://127.0.0.1:19090/on-publish || true)
+          echo "unauthorized_callback_http=$code"
+          test "$code" = "403"
+          grep -q 'http_hooks' /opt/srs-staging/tanbo-staging.conf
           ss -ltn | grep -q '127.0.0.1:19090'
-          cfg=/opt/srs-staging/tanbo-staging.conf
-          test -f "$cfg"
-          cp -a "$cfg" "$cfg.pre-hooks-$(date +%Y%m%d%H%M%S)"
-          grep -q 'http_hooks' "$cfg" && { echo 'hooks already present; refusing duplicate edit'; exit 4; }
-          python3 - <<'PY'
-          from pathlib import Path
-          p=Path('/opt/srs-staging/tanbo-staging.conf')
-          s=p.read_text()
-          marker='vhost staging.tanbo.internal {'
-          if marker not in s:
-              raise SystemExit('staging vhost marker missing')
-          block='''vhost staging.tanbo.internal {
-              http_hooks {
-                  enabled on;
-                  on_publish http://127.0.0.1:19090/on-publish;
-                  on_unpublish http://127.0.0.1:19090/on-unpublish;
-              }
-          '''
-          p.write_text(s.replace(marker, block, 1))
-          PY
-          docker exec srs-staging /usr/local/srs/objs/srs -t -c /usr/local/srs/conf/tanbo-staging.conf
-          docker restart srs-staging >/dev/null
-          sleep 2
-          test "$(docker inspect -f '{{.State.Running}}' srs-staging)" = true
-          test "$(docker inspect -f '{{.State.Running}}' srs)" = true
-          systemctl is-active --quiet tanbo-staging-relay.service
-          grep -q 'on_publish http://127.0.0.1:19090/on-publish;' "$cfg"
-          grep -q 'on_unpublish http://127.0.0.1:19090/on-unpublish;' "$cfg"
-          echo "staging_hooks_configured=true"
+          test -z "$(ss -ltn | grep ':19090' | grep -v '127.0.0.1:19090' || true)"
+          echo "unauthorized_publish_rejected=true"
+          echo "relay_loopback_only=true"
           echo "production_srs=$(docker inspect -f '{{.State.Running}}' srs)"
           echo "staging_srs=$(docker inspect -f '{{.State.Running}}' srs-staging)"
           REMOTE
