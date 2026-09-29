@@ -1,0 +1,44 @@
+name: OVH Staging Preflight
+on:
+  workflow_dispatch:
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure SSH
+        env:
+          OVH_SSH_KEY: ${{ secrets.OVH_SSH_KEY }}
+          OVH_HOST: ${{ secrets.OVH_HOST }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$OVH_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "$OVH_HOST" >> ~/.ssh/known_hosts
+      - name: Read-only staging preflight
+        env:
+          OVH_HOST: ${{ secrets.OVH_HOST }}
+          OVH_USER: ${{ secrets.OVH_USER }}
+        run: |
+          ssh -i ~/.ssh/id_ed25519 "$OVH_USER@$OVH_HOST" "sudo bash -s" <<'REMOTE'
+          set -u
+          echo "=== HOST ==="
+          hostname
+          echo "=== SRS CONTAINERS ==="
+          docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Ports}}'
+          echo "=== SRS CURRENT CONFIG ==="
+          sed -n '1,220p' /opt/srs/tanbo.conf 2>/dev/null || true
+          echo "=== SRS MOUNTS/RUNTIME ==="
+          docker inspect srs --format 'IMAGE={{.Config.Image}} RESTART={{.HostConfig.RestartPolicy.Name}} NET={{.HostConfig.NetworkMode}}' 2>/dev/null || true
+          docker inspect srs --format '{{json .Mounts}}' 2>/dev/null || true
+          echo "=== NGINX SERVER NAMES/ROUTES ==="
+          nginx -T 2>/dev/null | grep -nE 'server_name|listen 443|listen 80|location |proxy_pass|ssl_certificate' | head -220 || true
+          echo "=== LISTENERS ==="
+          ss -lntup 2>/dev/null | grep -E ':(22|80|443|1935|1985|8080|8000|1936|1986|8081|8001)[[:space:]]' || true
+          echo "=== FIREWALL ==="
+          ufw status verbose 2>/dev/null || true
+          echo "=== DISK/MEMORY ==="
+          df -h /
+          free -h
+          echo "=== CANDIDATE FILES ==="
+          find /opt/srs /etc/nginx/sites-enabled /etc/nginx/sites-available -maxdepth 2 -type f -printf '%p\n' 2>/dev/null | sort
+          REMOTE
