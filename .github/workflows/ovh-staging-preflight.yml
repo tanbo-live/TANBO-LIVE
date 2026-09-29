@@ -2,7 +2,7 @@ name: OVH Staging Preflight
 on:
   workflow_dispatch:
 jobs:
-  staging-relay:
+  staging-hooks:
     runs-on: ubuntu-latest
     steps:
       - name: Configure SSH
@@ -14,7 +14,7 @@ jobs:
           printf '%s\n' "$OVH_SSH_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -H "$OVH_HOST" >> ~/.ssh/known_hosts
-      - name: Install and verify isolated staging relay
+      - name: Enable hooks on isolated staging SRS
         env:
           OVH_HOST: ${{ secrets.OVH_HOST }}
           OVH_USER: ${{ secrets.OVH_USER }}
@@ -23,44 +23,37 @@ jobs:
           set -euo pipefail
           test "$(docker inspect -f '{{.State.Running}}' srs)" = true
           test "$(docker inspect -f '{{.State.Running}}' srs-staging)" = true
-          test -s /etc/tanbo-staging-relay/signing-key
-          test -f /opt/tanbo-staging-relay/relay.py
-          python3 -m py_compile /opt/tanbo-staging-relay/relay.py
-          install -d -m 700 /etc/tanbo-staging-relay
-          {
-            printf 'TANBO_SRS_HOOK_SIGNING_KEY='
-            cat /etc/tanbo-staging-relay/signing-key
-            printf '\nTANBO_STAGING_API_ORIGIN=https://tanbo-staging.replit.app\n'
-          } > /etc/tanbo-staging-relay/relay.env
-          chmod 600 /etc/tanbo-staging-relay/relay.env
-          cat > /etc/systemd/system/tanbo-staging-relay.service <<'UNIT'
-          [Unit]
-          Description=TANBO staging SRS trusted hook relay
-          After=network-online.target
-          Wants=network-online.target
-
-          [Service]
-          Type=simple
-          EnvironmentFile=/etc/tanbo-staging-relay/relay.env
-          ExecStart=/usr/bin/python3 /opt/tanbo-staging-relay/relay.py
-          Restart=on-failure
-          RestartSec=2
-          NoNewPrivileges=true
-          PrivateTmp=true
-          ProtectSystem=strict
-          ProtectHome=true
-
-          [Install]
-          WantedBy=multi-user.target
-          UNIT
-          systemctl daemon-reload
-          systemctl enable --now tanbo-staging-relay.service
-          sleep 2
           systemctl is-active --quiet tanbo-staging-relay.service
           ss -ltn | grep -q '127.0.0.1:19090'
-          test -z "$(ss -ltn | grep ':19090' | grep -v '127.0.0.1:19090' || true)"
-          echo "relay_active=true"
-          echo "relay_loopback_only=true"
+          cfg=/opt/srs-staging/tanbo-staging.conf
+          test -f "$cfg"
+          cp -a "$cfg" "$cfg.pre-hooks-$(date +%Y%m%d%H%M%S)"
+          grep -q 'http_hooks' "$cfg" && { echo 'hooks already present; refusing duplicate edit'; exit 4; }
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('/opt/srs-staging/tanbo-staging.conf')
+          s=p.read_text()
+          marker='vhost staging.tanbo.internal {'
+          if marker not in s:
+              raise SystemExit('staging vhost marker missing')
+          block='''vhost staging.tanbo.internal {
+              http_hooks {
+                  enabled on;
+                  on_publish http://127.0.0.1:19090/on-publish;
+                  on_unpublish http://127.0.0.1:19090/on-unpublish;
+              }
+          '''
+          p.write_text(s.replace(marker, block, 1))
+          PY
+          docker exec srs-staging /usr/local/srs/objs/srs -t -c /usr/local/srs/conf/tanbo-staging.conf
+          docker restart srs-staging >/dev/null
+          sleep 2
+          test "$(docker inspect -f '{{.State.Running}}' srs-staging)" = true
+          test "$(docker inspect -f '{{.State.Running}}' srs)" = true
+          systemctl is-active --quiet tanbo-staging-relay.service
+          grep -q 'on_publish http://127.0.0.1:19090/on-publish;' "$cfg"
+          grep -q 'on_unpublish http://127.0.0.1:19090/on-unpublish;' "$cfg"
+          echo "staging_hooks_configured=true"
           echo "production_srs=$(docker inspect -f '{{.State.Running}}' srs)"
           echo "staging_srs=$(docker inspect -f '{{.State.Running}}' srs-staging)"
           REMOTE
