@@ -39,7 +39,7 @@ jobs:
           sed -n '1,180p' /opt/srs/tanbo.conf 2>/dev/null || true
           echo DOCKER_BINDINGS
           docker inspect srs --format '{{json .HostConfig.PortBindings}}' 2>/dev/null || true
-          echo DOCKER_MOUNTS
+          echo DOCKER_RUNTIME\n          docker inspect srs --format 'IMAGE={{.Config.Image}} CMD={{json .Config.Cmd}} ENTRY={{json .Config.Entrypoint}} RESTART={{.HostConfig.RestartPolicy.Name}} NET={{.HostConfig.NetworkMode}}' 2>/dev/null || true\n          echo DOCKER_MOUNTS
           docker inspect srs --format '{{json .Mounts}}' 2>/dev/null || true
           echo LISTENING_PORTS
           ss -lntup 2>/dev/null | grep -E ':(1935|1985|8080|8000)[[:space:]]' || true
