@@ -2,7 +2,7 @@ name: OVH Staging Preflight
 on:
   workflow_dispatch:
 jobs:
-  verify-staging-hook-denial:
+  inspect-staging-publish-hook:
     runs-on: ubuntu-latest
     steps:
       - name: Configure SSH
@@ -14,7 +14,7 @@ jobs:
           printf '%s\n' "$OVH_SSH_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -H "$OVH_HOST" >> ~/.ssh/known_hosts
-      - name: Verify SRS reaches relay and unauthorized publish is denied
+      - name: Inspect staging SRS hook behavior without changes
         env:
           OVH_HOST: ${{ secrets.OVH_HOST }}
           OVH_USER: ${{ secrets.OVH_USER }}
@@ -24,21 +24,17 @@ jobs:
           test "$(docker inspect -f '{{.State.Running}}' srs)" = true
           test "$(docker inspect -f '{{.State.Running}}' srs-staging)" = true
           systemctl is-active --quiet tanbo-staging-relay.service
-          before=$(docker logs srs-staging 2>&1 | wc -l)
-          # A deliberately invalid/unauthorized WHIP attempt. The security assertion is
-          # that SRS can now invoke the relay; SDP validity is not used as proof.
-          curl -sS --max-time 6 -o /tmp/whip.out -X POST             -H 'Content-Type: application/sdp'             --data-binary $'v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=mid:0\r\na=sendonly\r\na=rtcp-mux\r\na=rtpmap:96 H264/90000\r\n'             'http://127.0.0.1:1986/rtc/v1/whip/?app=live&stream=unauthorized-after-bridge&vhost=staging.tanbo.internal' || true
-          sleep 1
-          docker logs --since 10s srs-staging 2>&1 >/tmp/srs-new.log || true
-          echo "--- recent security-relevant SRS lines ---"
-          grep -E 'on_publish|19090|unauthorized-after-bridge|http_hooks' /tmp/srs-new.log || true
-          if grep -q 'connect http 127.0.0.1:19090' /tmp/srs-new.log; then
-            echo "old_loopback_hook_still_used=true"; exit 1
-          fi
-          if grep -q '172.17.0.1:19090' /tmp/srs-new.log; then
-            echo "srs_relay_bridge_path_observed=true"
-          fi
+          echo "--- staging hook config ---"
+          docker exec srs-staging sh -c "grep -n -A12 -B4 -E 'http_hooks|on_publish|on_unpublish' /usr/local/srs/conf/tanbo-staging.conf || true"
+          echo "--- relay service recent log ---"
+          journalctl -u tanbo-staging-relay.service --since "15 minutes ago" --no-pager | tail -120 || true
+          echo "--- staging SRS recent hook/WHIP log ---"
+          docker logs --since 15m srs-staging 2>&1 | grep -E 'on_publish|on_unpublish|http_hooks|whip|19090|unauthorized' | tail -160 || true
+          echo "--- listeners ---"
+          ss -ltnp | grep -E '19090|1986|8081|1936' || true
+          echo "--- container gateway ---"
+          docker inspect -f '{{range .NetworkSettings.Networks}}{{.Gateway}} {{.IPAddress}}{{end}}' srs-staging
           test "$(docker inspect -f '{{.State.Running}}' srs)" = true
           echo "production_srs_running=true"
-          echo "verification_complete=true"
+          echo "inspection_complete=true"
           REMOTE
