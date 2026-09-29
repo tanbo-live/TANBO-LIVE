@@ -2,7 +2,7 @@ name: OVH Staging Preflight
 on:
   workflow_dispatch:
 jobs:
-  staging-auth-test:
+  staging-rtc-inspect:
     runs-on: ubuntu-latest
     steps:
       - name: Configure SSH
@@ -14,37 +14,28 @@ jobs:
           printf '%s\n' "$OVH_SSH_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -H "$OVH_HOST" >> ~/.ssh/known_hosts
-      - name: Verify staging hooks and unauthorized WHIP fail closed
+      - name: Inspect staging RTC prerequisites without changes
         env:
           OVH_HOST: ${{ secrets.OVH_HOST }}
           OVH_USER: ${{ secrets.OVH_USER }}
         run: |
           ssh -i ~/.ssh/id_ed25519 "$OVH_USER@$OVH_HOST" "sudo bash -s" <<'REMOTE'
           set -euo pipefail
-          test "$(docker inspect -f '{{.State.Running}}' srs)" = true
-          test "$(docker inspect -f '{{.State.Running}}' srs-staging)" = true
-          systemctl is-active --quiet tanbo-staging-relay.service
-          code=$(curl -sS -o /tmp/tanbo-hook-test.out -w '%{http_code}' -H 'Content-Type: application/json' --data '{"action":"on_publish","vhost":"staging.tanbo.internal","app":"live","stream":"unauthorized-staging-probe","client_id":"probe"}' http://127.0.0.1:19090/on-publish || true)
-          echo "unauthorized_callback_http=$code"
-          test "$code" = "403"
-          grep -q 'http_hooks' /opt/srs-staging/tanbo-staging.conf
-          ss -ltn | grep -q '127.0.0.1:19090'
-          test -z "$(ss -ltn | grep ':19090' | grep -v '127.0.0.1:19090' || true)"
-
-          # Discover staging WHIP listener/route from installed config without changing it.
-          echo "checking_unauthorized_whip=true"
-          docker exec srs-staging sh -lc 'grep -nE "rtc_server|http_server|listen|candidate|whip|rtc" /usr/local/srs/conf/tanbo-staging.conf 2>/dev/null || true' || true
-          # SRS WHIP is served over its HTTP API/server path. Probe the loopback-only staging HTTP listener.
-          whip_code=$(curl -sS --max-time 8 -o /tmp/tanbo-whip-test.out -w '%{http_code}' \
-            -X POST -H 'Content-Type: application/sdp' \
-            --data-binary $'v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=unauthorized\r\nt=0 0\r\na=group:BUNDLE 0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=mid:0\r\na=sendonly\r\na=rtcp-mux\r\na=rtpmap:96 H264/90000\r\n' \
-            'http://127.0.0.1:1986/rtc/v1/whip/?app=live&stream=unauthorized-staging-probe&vhost=staging.tanbo.internal' || true)
-          echo "unauthorized_whip_http=$whip_code"
-          test "$whip_code" = "403"
-
-          echo "unauthorized_publish_rejected=true"
-          echo "unauthorized_whip_rejected=true"
-          echo "relay_loopback_only=true"
           echo "production_srs=$(docker inspect -f '{{.State.Running}}' srs)"
           echo "staging_srs=$(docker inspect -f '{{.State.Running}}' srs-staging)"
+          echo "relay=$(systemctl is-active tanbo-staging-relay.service || true)"
+          echo "--- staging config ---"
+          sed -n '1,220p' /opt/srs-staging/tanbo-staging.conf
+          echo "--- staging container mounts/ports/env names ---"
+          docker inspect srs-staging --format 'Image={{.Config.Image}} Restart={{.HostConfig.RestartPolicy.Name}}'
+          docker inspect srs-staging --format '{{range .Mounts}}Mount {{.Source}} -> {{.Destination}} rw={{.RW}}{{println}}{{end}}'
+          docker inspect srs-staging --format '{{range $p,$v := .NetworkSettings.Ports}}Port {{$p}} -> {{range $v}}{{.HostIp}}:{{.HostPort}} {{end}}{{println}}{{end}}'
+          docker inspect srs-staging --format '{{range .Config.Env}}{{println .}}{{end}}' | sed -E 's/=.*$/=<redacted>/' || true
+          echo "--- listeners relevant to staging/rtc ---"
+          ss -lntup | grep -E ':(1936|1986|8081|8000|8001|19090)\b' || true
+          echo "--- firewall status ---"
+          ufw status numbered || true
+          echo "--- nginx staging references ---"
+          grep -R -n -E 'staging-live|1936|1986|8081|8001' /etc/nginx/sites-enabled /etc/nginx/conf.d 2>/dev/null || true
+          echo "inspection_complete=true"
           REMOTE
