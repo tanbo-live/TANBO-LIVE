@@ -2,7 +2,7 @@ name: OVH Staging Preflight
 on:
   workflow_dispatch:
 jobs:
-  inspect-staging-relay-network:
+  connect-staging-relay:
     runs-on: ubuntu-latest
     steps:
       - name: Configure SSH
@@ -14,24 +14,40 @@ jobs:
           printf '%s\n' "$OVH_SSH_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -H "$OVH_HOST" >> ~/.ssh/known_hosts
-      - name: Inspect relay and Docker bridge without changes
+      - name: Connect staging SRS to relay on Docker bridge
         env:
           OVH_HOST: ${{ secrets.OVH_HOST }}
           OVH_USER: ${{ secrets.OVH_USER }}
         run: |
           ssh -i ~/.ssh/id_ed25519 "$OVH_USER@$OVH_HOST" "sudo bash -s" <<'REMOTE'
           set -euo pipefail
-          echo "--- relay service ---"
-          systemctl cat tanbo-staging-relay.service
-          echo "--- relay source bind lines ---"
-          grep -nE '19090|HTTPServer|ThreadingHTTPServer|bind|listen' /opt/tanbo-staging-relay/relay.py || true
-          echo "--- docker bridge ---"
-          docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}'
-          echo "--- staging network ---"
-          docker inspect srs-staging --format '{{range .NetworkSettings.Networks}}{{.Gateway}} {{.IPAddress}}{{end}}'
-          echo "--- listeners ---"
-          ss -ltn | grep ':19090' || true
-          echo "production_srs=$(docker inspect -f '{{.State.Running}}' srs)"
-          echo "staging_srs=$(docker inspect -f '{{.State.Running}}' srs-staging)"
-          echo "inspection_complete=true"
+          test "$(docker inspect -f '{{.State.Running}}' srs)" = true
+          cp -a /opt/tanbo-staging-relay/relay.py /opt/tanbo-staging-relay/relay.py.before-bridge
+          cp -a /opt/srs-staging/tanbo-staging.conf /opt/srs-staging/tanbo-staging.conf.before-bridge
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('/opt/tanbo-staging-relay/relay.py')
+          s=p.read_text()
+          old='http.server.ThreadingHTTPServer(("127.0.0.1", 19090), H).serve_forever()'
+          new='http.server.ThreadingHTTPServer(("172.17.0.1", 19090), H).serve_forever()'
+          if old not in s:
+              raise SystemExit('expected relay bind line not found')
+          p.write_text(s.replace(old,new,1))
+          q=Path('/opt/srs-staging/tanbo-staging.conf')
+          t=q.read_text()
+          if 'http://127.0.0.1:19090/' not in t:
+              raise SystemExit('expected staging hook URL not found')
+          q.write_text(t.replace('http://127.0.0.1:19090/','http://172.17.0.1:19090/'))
+          PY
+          python3 -m py_compile /opt/tanbo-staging-relay/relay.py
+          systemctl restart tanbo-staging-relay.service
+          systemctl is-active --quiet tanbo-staging-relay.service
+          docker restart srs-staging >/dev/null
+          sleep 3
+          test "$(docker inspect -f '{{.State.Running}}' srs-staging)" = true
+          test "$(docker inspect -f '{{.State.Running}}' srs)" = true
+          ss -ltn | grep -q '172.17.0.1:19090'
+          echo "relay_bridge_listener=true"
+          echo "production_srs=true"
+          echo "staging_srs=true"
           REMOTE
