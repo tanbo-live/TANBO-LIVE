@@ -1,6 +1,6 @@
 name: OVH Staging Preflight
 on:
-  workflow_dispatch:
+  workflow_dispatch: {}
 jobs:
   fix-staging-hook-path:
     runs-on: ubuntu-latest
