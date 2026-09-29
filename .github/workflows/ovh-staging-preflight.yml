@@ -28,8 +28,8 @@ jobs:
           from pathlib import Path
           p=Path('/opt/tanbo-staging-relay/relay.py')
           s=p.read_text()
-          old='http.server.ThreadingHTTPServer(("127.0.0.1", 19090), H).serve_forever()'
-          new='http.server.ThreadingHTTPServer(("172.17.0.1", 19090), H).serve_forever()'
+          old='http.server.ThreadingHTTPServer(("127.0.0.1",19090),H).serve_forever()'
+          new='http.server.ThreadingHTTPServer(("172.17.0.1",19090),H).serve_forever()'
           if old not in s:
               raise SystemExit('expected relay bind line not found')
           p.write_text(s.replace(old,new,1))
