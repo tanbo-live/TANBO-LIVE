@@ -2,7 +2,7 @@ name: OVH Staging Preflight
 on:
   workflow_dispatch:
 jobs:
-  prepare-staging:
+  staging-relay-prep:
     runs-on: ubuntu-latest
     steps:
       - name: Configure SSH
@@ -14,7 +14,7 @@ jobs:
           printf '%s\n' "$OVH_SSH_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -H "$OVH_HOST" >> ~/.ssh/known_hosts
-      - name: Prepare isolated staging SRS
+      - name: Prepare relay skeleton without secrets or public routing
         env:
           OVH_HOST: ${{ secrets.OVH_HOST }}
           OVH_USER: ${{ secrets.OVH_USER }}
@@ -22,46 +22,42 @@ jobs:
           ssh -i ~/.ssh/id_ed25519 "$OVH_USER@$OVH_HOST" "sudo bash -s" <<'REMOTE'
           set -euo pipefail
           test "$(docker inspect -f '{{.State.Running}}' srs)" = "true"
-          mkdir -p /opt/srs-staging
-          cat >/opt/srs-staging/tanbo-staging.conf <<'CONF'
-          listen 1935;
-          max_connections 1000;
-          srs_log_tank console;
-          daemon off;
-          http_api {
-              enabled on;
-              listen 1985;
-          }
-          http_server {
-              enabled on;
-              listen 8080;
-              dir ./objs/nginx/html;
-          }
-          vhost staging.tanbo.internal {
-              hls {
-                  enabled on;
-              }
-              http_remux {
-                  enabled on;
-                  mount [vhost]/[app]/[stream].flv;
-              }
-          }
-          CONF
-          docker rm -f srs-staging >/dev/null 2>&1 || true
-          docker run -d --name srs-staging --restart unless-stopped \
-            -p 127.0.0.1:1936:1935/tcp \
-            -p 127.0.0.1:1986:1985/tcp \
-            -p 127.0.0.1:8081:8080/tcp \
-            -v /opt/srs-staging/tanbo-staging.conf:/usr/local/srs/conf/tanbo-staging.conf:ro \
-            ossrs/srs:6 ./objs/srs -c conf/tanbo-staging.conf
-          sleep 2
           test "$(docker inspect -f '{{.State.Running}}' srs-staging)" = "true"
-          curl -fsS http://127.0.0.1:1986/api/v1/versions
-          echo
-          echo "=== STAGING BINDINGS ==="
-          docker port srs-staging
-          echo "=== PRODUCTION STILL RUNNING ==="
-          docker inspect -f '{{.State.Running}}' srs
-          echo "=== STAGING CONFIG ==="
-          grep -nE 'listen|vhost|http_api|http_server|http_hooks|on_publish|on_unpublish' /opt/srs-staging/tanbo-staging.conf
+          install -d -m 700 /opt/tanbo-staging-relay
+          cat >/opt/tanbo-staging-relay/relay.py <<'PY'
+          import hashlib, hmac, http.server, os, time, urllib.request, urllib.error
+          KEY=os.environ.get("TANBO_SRS_HOOK_SIGNING_KEY","").encode()
+          TARGET=os.environ.get("TANBO_STAGING_API_ORIGIN","").rstrip("/")
+          class H(http.server.BaseHTTPRequestHandler):
+              def do_POST(self):
+                  if self.path not in ("/on-publish","/on-unpublish") or not KEY or not TARGET:
+                      self.send_response(503); self.end_headers(); return
+                  n=int(self.headers.get("Content-Length","0"))
+                  if n < 1 or n > 8192:
+                      self.send_response(413); self.end_headers(); return
+                  body=self.rfile.read(n)
+                  ts=str(int(time.time()))
+                  sig=hmac.new(KEY, ts.encode()+b"."+body, hashlib.sha256).hexdigest()
+                  suffix="/api/internal/srs/on-publish" if self.path=="/on-publish" else "/api/internal/srs/on-unpublish"
+                  req=urllib.request.Request(TARGET+suffix,data=body,method="POST",headers={
+                      "Content-Type":"application/json",
+                      "X-Tanbo-SRS-Timestamp":ts,
+                      "X-Tanbo-SRS-Signature":sig})
+                  try:
+                      with urllib.request.urlopen(req,timeout=5) as r:
+                          out=r.read(8192); code=r.status
+                  except urllib.error.HTTPError as e:
+                      code=e.code; out=e.read(8192)
+                  except Exception:
+                      code=503; out=b"hook unavailable"
+                  self.send_response(code); self.send_header("Content-Type","text/plain"); self.end_headers(); self.wfile.write(out)
+              def log_message(self, fmt, *args): pass
+          http.server.ThreadingHTTPServer(("127.0.0.1",19090),H).serve_forever()
+          PY
+          chmod 700 /opt/tanbo-staging-relay/relay.py
+          python3 -m py_compile /opt/tanbo-staging-relay/relay.py
+          echo "relay skeleton validated; not started because secrets/API origin are intentionally unset"
+          echo "production_srs=$(docker inspect -f '{{.State.Running}}' srs)"
+          echo "staging_srs=$(docker inspect -f '{{.State.Running}}' srs-staging)"
+          ss -lnt | grep ':19090 ' && exit 1 || true
           REMOTE
