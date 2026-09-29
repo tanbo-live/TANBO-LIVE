@@ -2,7 +2,7 @@ name: OVH Staging Preflight
 on:
   workflow_dispatch:
 jobs:
-  staging-rtc-inspect:
+  enable-staging-rtc:
     runs-on: ubuntu-latest
     steps:
       - name: Configure SSH
@@ -14,28 +14,46 @@ jobs:
           printf '%s\n' "$OVH_SSH_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -H "$OVH_HOST" >> ~/.ssh/known_hosts
-      - name: Inspect staging RTC prerequisites without changes
+      - name: Enable isolated RTC on staging SRS only
         env:
           OVH_HOST: ${{ secrets.OVH_HOST }}
           OVH_USER: ${{ secrets.OVH_USER }}
         run: |
           ssh -i ~/.ssh/id_ed25519 "$OVH_USER@$OVH_HOST" "sudo bash -s" <<'REMOTE'
           set -euo pipefail
+          test "$(docker inspect -f '{{.State.Running}}' srs)" = true
+          cp -a /opt/srs-staging/tanbo-staging.conf /opt/srs-staging/tanbo-staging.conf.pre-rtc
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('/opt/srs-staging/tanbo-staging.conf')
+          s=p.read_text()
+          if 'rtc_server {' not in s:
+              marker='vhost staging.tanbo.internal {'
+              s=s.replace(marker, 'rtc_server {\n    enabled on;\n    listen 8001;\n    candidate 51.89.224.80;\n}\n\n'+marker)
+          if 'rtc {' not in s:
+              marker='    hls {'
+              s=s.replace(marker, '    rtc {\n        enabled on;\n        rtmp_to_rtc on;\n        rtc_to_rtmp on;\n    }\n\n'+marker)
+          p.write_text(s)
+          PY
+          docker rm -f srs-staging
+          docker run -d --name srs-staging --restart unless-stopped \
+            -p 127.0.0.1:1936:1935/tcp \
+            -p 127.0.0.1:1986:1985/tcp \
+            -p 127.0.0.1:8081:8080/tcp \
+            -p 8001:8001/udp \
+            -v /opt/srs-staging/tanbo-staging.conf:/usr/local/srs/conf/tanbo-staging.conf:ro \
+            ossrs/srs:6 ./objs/srs -c conf/tanbo-staging.conf
+          sleep 3
+          test "$(docker inspect -f '{{.State.Running}}' srs-staging)" = true
+          test "$(docker inspect -f '{{.State.Running}}' srs)" = true
+          systemctl is-active --quiet tanbo-staging-relay.service
+          grep -q 'rtc_server' /opt/srs-staging/tanbo-staging.conf
+          grep -q 'listen 8001;' /opt/srs-staging/tanbo-staging.conf
+          ss -lun | grep -q ':8001'
+          # Keep staging RTC inaccessible externally until authorization behavior is proven.
+          ufw deny 8001/udp >/dev/null || true
+          echo "staging_rtc_enabled=true"
+          echo "staging_rtc_udp=8001"
+          echo "staging_rtc_external=blocked"
           echo "production_srs=$(docker inspect -f '{{.State.Running}}' srs)"
-          echo "staging_srs=$(docker inspect -f '{{.State.Running}}' srs-staging)"
-          echo "relay=$(systemctl is-active tanbo-staging-relay.service || true)"
-          echo "--- staging config ---"
-          sed -n '1,220p' /opt/srs-staging/tanbo-staging.conf
-          echo "--- staging container mounts/ports/env names ---"
-          docker inspect srs-staging --format 'Image={{.Config.Image}} Restart={{.HostConfig.RestartPolicy.Name}}'
-          docker inspect srs-staging --format '{{range .Mounts}}Mount {{.Source}} -> {{.Destination}} rw={{.RW}}{{println}}{{end}}'
-          docker inspect srs-staging --format '{{range $p,$v := .NetworkSettings.Ports}}Port {{$p}} -> {{range $v}}{{.HostIp}}:{{.HostPort}} {{end}}{{println}}{{end}}'
-          docker inspect srs-staging --format '{{range .Config.Env}}{{println .}}{{end}}' | sed -E 's/=.*$/=<redacted>/' || true
-          echo "--- listeners relevant to staging/rtc ---"
-          ss -lntup | grep -E ':(1936|1986|8081|8000|8001|19090)\b' || true
-          echo "--- firewall status ---"
-          ufw status numbered || true
-          echo "--- nginx staging references ---"
-          grep -R -n -E 'staging-live|1936|1986|8081|8001' /etc/nginx/sites-enabled /etc/nginx/conf.d 2>/dev/null || true
-          echo "inspection_complete=true"
           REMOTE
