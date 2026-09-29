@@ -43,8 +43,7 @@ jobs:
           docker inspect srs --format '{{json .Mounts}}' 2>/dev/null || true
           echo LISTENING_PORTS
           ss -lntup 2>/dev/null | grep -E ':(1935|1985|8080|8000)[[:space:]]' || true
-          echo FIREWALL_STATUS
-          ufw status verbose 2>/dev/null || true
+          echo SECURITY_READINESS\n          echo 'Firewall activation and port restriction require an approved infrastructure change.'\n          echo FIREWALL_STATUS\n          ufw status verbose 2>/dev/null || true
           echo NGINX_PROXY_ROUTES
           nginx -T 2>/dev/null | grep -E 'location |proxy_pass|listen ' | head -120 || true
           echo SRS_LOG_TAIL
