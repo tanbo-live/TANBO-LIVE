@@ -54,7 +54,15 @@ jobs:
 
           echo "=== relay reachability from staging container ==="
           if [ -n "$gateway" ]; then
-            docker exec srs-staging sh -c "wget -S -O- -T 5 http://$gateway:19090/ 2>&1 || true" || true
+            if docker exec srs-staging sh -c "command -v curl >/dev/null 2>&1"; then
+              docker exec srs-staging sh -c "curl -sv --max-time 5 http://$gateway:19090/ 2>&1 || true"
+            elif docker exec srs-staging sh -c "command -v busybox >/dev/null 2>&1"; then
+              docker exec srs-staging sh -c "busybox wget -S -O- -T 5 http://$gateway:19090/ 2>&1 || true"
+            else
+              echo "container_http_client=absent"
+              echo "testing_tcp_from_host_to_relay_bind=$gateway:19090"
+              timeout 5 bash -c "</dev/tcp/$gateway/19090" && echo "relay_tcp_reachable=true" || echo "relay_tcp_reachable=false"
+            fi
           fi
 
           echo "=== recent relay journal ==="
