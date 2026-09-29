@@ -2,7 +2,7 @@ name: OVH Staging Preflight
 on:
   workflow_dispatch:
 jobs:
-  inspect-staging-publish-hook:
+  verify-staging-publish-denial:
     runs-on: ubuntu-latest
     steps:
       - name: Configure SSH
@@ -14,7 +14,7 @@ jobs:
           printf '%s\n' "$OVH_SSH_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -H "$OVH_HOST" >> ~/.ssh/known_hosts
-      - name: Inspect staging SRS hook behavior without changes
+      - name: Verify unauthorized WHIP publish is denied by staging hook
         env:
           OVH_HOST: ${{ secrets.OVH_HOST }}
           OVH_USER: ${{ secrets.OVH_USER }}
@@ -24,17 +24,32 @@ jobs:
           test "$(docker inspect -f '{{.State.Running}}' srs)" = true
           test "$(docker inspect -f '{{.State.Running}}' srs-staging)" = true
           systemctl is-active --quiet tanbo-staging-relay.service
-          echo "--- staging hook config ---"
-          docker exec srs-staging sh -c "grep -n -A12 -B4 -E 'http_hooks|on_publish|on_unpublish' /usr/local/srs/conf/tanbo-staging.conf || true"
-          echo "--- relay service recent log ---"
-          journalctl -u tanbo-staging-relay.service --since "15 minutes ago" --no-pager | tail -120 || true
-          echo "--- staging SRS recent hook/WHIP log ---"
-          docker logs --since 15m srs-staging 2>&1 | grep -E 'on_publish|on_unpublish|http_hooks|whip|19090|unauthorized' | tail -160 || true
-          echo "--- listeners ---"
-          ss -ltnp | grep -E '19090|1986|8081|1936' || true
-          echo "--- container gateway ---"
-          docker inspect -f '{{range .NetworkSettings.Networks}}{{.Gateway}} {{.IPAddress}}{{end}}' srs-staging
+          ss -ltn | grep -q '172.17.0.1:19090'
+
+          before="$(docker logs srs-staging 2>&1 | wc -l)"
+          sdp=$'v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0\r\na=msid-semantic: WMS\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\nc=IN IP4 0.0.0.0\r\na=mid:0\r\na=sendonly\r\na=rtcp-mux\r\na=ice-ufrag:test\r\na=ice-pwd:testtesttesttesttesttest\r\na=fingerprint:sha-256 00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00\r\na=setup:actpass\r\na=rtpmap:111 opus/48000/2\r\n'
+          set +e
+          curl -sS --max-time 8 -o /tmp/tanbo-whip-body -w '%{http_code}'             -H 'Content-Type: application/sdp'             --data-binary "$sdp"             'http://127.0.0.1:1986/rtc/v1/whip/?app=live&stream=unauthorized-hook-proof&vhost=staging.tanbo.internal'             >/tmp/tanbo-whip-code
+          curl_rc=$?
+          set -e
+          sleep 2
+
+          code="$(cat /tmp/tanbo-whip-code 2>/dev/null || true)"
+          echo "whip_http_code=${code:-none}"
+          echo "curl_exit=$curl_rc"
+          recent="$(docker logs srs-staging 2>&1 | tail -n +$((before + 1)))"
+          printf '%s\n' "$recent" | grep -E 'on_publish|unauthorized-hook-proof|19090|http_hooks|failed|denied' || true
+
+          printf '%s\n' "$recent" | grep -q 'unauthorized-hook-proof'
+          printf '%s\n' "$recent" | grep -q 'on_publish'
+          if printf '%s\n' "$recent" | grep -Eq 'on_publish failed|http_hooks.*failed|connect server failed'; then
+            echo "unauthorized_publish_denied_by_hook=true"
+          else
+            echo "Could not prove hook denial from SRS logs" >&2
+            exit 1
+          fi
+
           test "$(docker inspect -f '{{.State.Running}}' srs)" = true
           echo "production_srs_running=true"
-          echo "inspection_complete=true"
+          echo "verification_complete=true"
           REMOTE
