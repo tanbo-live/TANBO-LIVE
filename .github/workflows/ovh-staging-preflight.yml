@@ -2,7 +2,7 @@ name: OVH Staging Preflight
 on:
   workflow_dispatch:
 jobs:
-  staging-https:
+  staging-relay:
     runs-on: ubuntu-latest
     steps:
       - name: Configure SSH
@@ -14,7 +14,7 @@ jobs:
           printf '%s\n' "$OVH_SSH_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -H "$OVH_HOST" >> ~/.ssh/known_hosts
-      - name: Configure isolated staging HTTPS
+      - name: Install and verify isolated staging relay
         env:
           OVH_HOST: ${{ secrets.OVH_HOST }}
           OVH_USER: ${{ secrets.OVH_USER }}
@@ -23,33 +23,44 @@ jobs:
           set -euo pipefail
           test "$(docker inspect -f '{{.State.Running}}' srs)" = true
           test "$(docker inspect -f '{{.State.Running}}' srs-staging)" = true
-          getent ahostsv4 staging-live.tanbo.co.uk | grep -q '51.89.224.80' || { echo 'DNS not propagated yet'; exit 2; }
-          cp -a /etc/nginx /etc/nginx.tanbo-pre-staging-$(date +%Y%m%d%H%M%S)
-          cat >/etc/nginx/sites-available/tanbo-staging-live <<'NGINX'
-          server {
-              listen 80;
-              server_name staging-live.tanbo.co.uk;
-              location / {
-                  proxy_pass http://127.0.0.1:8081;
-                  proxy_http_version 1.1;
-                  proxy_set_header Host $host;
-                  proxy_set_header X-Forwarded-Proto $scheme;
-                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-              }
-          }
-          NGINX
-          ln -sfn /etc/nginx/sites-available/tanbo-staging-live /etc/nginx/sites-enabled/tanbo-staging-live
-          nginx -t
-          systemctl reload nginx
-          if command -v certbot >/dev/null 2>&1; then
-            certbot --nginx -d staging-live.tanbo.co.uk --non-interactive --agree-tos --redirect --keep-until-expiring
-          else
-            echo 'certbot unavailable'; exit 3
-          fi
-          nginx -t
-          systemctl reload nginx
-          curl -fsS --max-time 10 https://staging-live.tanbo.co.uk/ >/dev/null
-          echo 'staging HTTPS healthy'
+          test -s /etc/tanbo-staging-relay/signing-key
+          test -f /opt/tanbo-staging-relay/relay.py
+          python3 -m py_compile /opt/tanbo-staging-relay/relay.py
+          install -d -m 700 /etc/tanbo-staging-relay
+          {
+            printf 'TANBO_SRS_HOOK_SIGNING_KEY='
+            cat /etc/tanbo-staging-relay/signing-key
+            printf '\nTANBO_STAGING_API_ORIGIN=https://tanbo-staging.replit.app\n'
+          } > /etc/tanbo-staging-relay/relay.env
+          chmod 600 /etc/tanbo-staging-relay/relay.env
+          cat > /etc/systemd/system/tanbo-staging-relay.service <<'UNIT'
+          [Unit]
+          Description=TANBO staging SRS trusted hook relay
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=simple
+          EnvironmentFile=/etc/tanbo-staging-relay/relay.env
+          ExecStart=/usr/bin/python3 /opt/tanbo-staging-relay/relay.py
+          Restart=on-failure
+          RestartSec=2
+          NoNewPrivileges=true
+          PrivateTmp=true
+          ProtectSystem=strict
+          ProtectHome=true
+
+          [Install]
+          WantedBy=multi-user.target
+          UNIT
+          systemctl daemon-reload
+          systemctl enable --now tanbo-staging-relay.service
+          sleep 2
+          systemctl is-active --quiet tanbo-staging-relay.service
+          ss -ltn | grep -q '127.0.0.1:19090'
+          test -z "$(ss -ltn | grep ':19090' | grep -v '127.0.0.1:19090' || true)"
+          echo "relay_active=true"
+          echo "relay_loopback_only=true"
           echo "production_srs=$(docker inspect -f '{{.State.Running}}' srs)"
           echo "staging_srs=$(docker inspect -f '{{.State.Running}}' srs-staging)"
           REMOTE
