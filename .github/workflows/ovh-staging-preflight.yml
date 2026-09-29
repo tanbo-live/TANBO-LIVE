@@ -2,7 +2,7 @@ name: OVH Staging Preflight
 on:
   workflow_dispatch:
 jobs:
-  inspect-staging-whip-endpoint:
+  inspect-staging-relay-network:
     runs-on: ubuntu-latest
     steps:
       - name: Configure SSH
@@ -14,30 +14,24 @@ jobs:
           printf '%s\n' "$OVH_SSH_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -H "$OVH_HOST" >> ~/.ssh/known_hosts
-      - name: Inspect WHIP endpoint and SRS logs without changes
+      - name: Inspect relay and Docker bridge without changes
         env:
           OVH_HOST: ${{ secrets.OVH_HOST }}
           OVH_USER: ${{ secrets.OVH_USER }}
         run: |
           ssh -i ~/.ssh/id_ed25519 "$OVH_USER@$OVH_HOST" "sudo bash -s" <<'REMOTE'
-          set -u
-          echo "--- state ---"
-          echo "production=$(docker inspect -f '{{.State.Running}}' srs)"
-          echo "staging=$(docker inspect -f '{{.State.Running}}' srs-staging)"
-          echo "--- config rtc/http ---"
-          grep -nE 'rtc_server|rtc \{|http_api|http_server|listen|candidate|http_hooks' /opt/srs-staging/tanbo-staging.conf || true
-          echo "--- ports ---"
-          docker port srs-staging || true
-          ss -lntup | grep -E ':(1986|8081|8001)\\b' || true
-          echo "--- API probes ---"
-          for u in \
-            'http://127.0.0.1:1986/api/v1/versions' \
-            'http://127.0.0.1:1986/rtc/v1/whip/' \
-            'http://127.0.0.1:8081/rtc/v1/whip/'; do
-            code=$(curl -sS --max-time 5 -o /tmp/probe.out -w '%{http_code}' "$u" || true)
-            echo "$u -> $code body=$(tr '\n' ' ' </tmp/probe.out 2>/dev/null | head -c 240)"
-          done
-          echo "--- recent staging SRS logs ---"
-          docker logs --tail 120 srs-staging 2>&1 | tail -120
+          set -euo pipefail
+          echo "--- relay service ---"
+          systemctl cat tanbo-staging-relay.service
+          echo "--- relay source bind lines ---"
+          grep -nE '19090|HTTPServer|ThreadingHTTPServer|bind|listen' /opt/tanbo-staging-relay/relay.py || true
+          echo "--- docker bridge ---"
+          docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}'
+          echo "--- staging network ---"
+          docker inspect srs-staging --format '{{range .NetworkSettings.Networks}}{{.Gateway}} {{.IPAddress}}{{end}}'
+          echo "--- listeners ---"
+          ss -ltn | grep ':19090' || true
+          echo "production_srs=$(docker inspect -f '{{.State.Running}}' srs)"
+          echo "staging_srs=$(docker inspect -f '{{.State.Running}}' srs-staging)"
           echo "inspection_complete=true"
           REMOTE
