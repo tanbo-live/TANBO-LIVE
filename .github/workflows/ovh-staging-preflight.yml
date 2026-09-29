@@ -4,8 +4,7 @@ run-name: OVH Staging Preflight — ${{ github.event_name }}
 on:
   workflow_dispatch:
   push:
-    branches:
-      - main
+    branches: [main]
     paths:
       - ".github/workflows/ovh-staging-preflight.yml"
 
@@ -37,69 +36,48 @@ jobs:
           echo "=== containers ==="
           docker inspect -f 'production_srs_running={{.State.Running}}' srs 2>&1
           docker inspect -f 'staging_srs_running={{.State.Running}}' srs-staging 2>&1
-
-          echo "=== staging docker network ==="
           gateway="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.Gateway}}{{end}}' srs-staging 2>/dev/null)"
-          container_ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' srs-staging 2>/dev/null)"
           echo "staging_gateway=$gateway"
-          echo "staging_container_ip=$container_ip"
 
-          echo "=== relay service/listener ==="
+          echo "=== relay/listener/hooks ==="
           systemctl is-active tanbo-staging-relay.service 2>&1
           ss -ltnp | grep ':19090' || true
-          grep -n 'ThreadingHTTPServer' /opt/tanbo-staging-relay/relay.py 2>/dev/null || true
-
-          echo "=== staging hooks ==="
           grep -n -A8 -B2 'http_hooks' /opt/srs-staging/tanbo-staging.conf 2>/dev/null || true
 
-          echo "=== relay reachability from staging container ==="
-          if [ -n "$gateway" ]; then
-            if docker exec srs-staging sh -c "command -v curl >/dev/null 2>&1"; then
-              docker exec srs-staging sh -c "curl -sv --max-time 5 http://$gateway:19090/ 2>&1 || true"
-            elif docker exec srs-staging sh -c "command -v busybox >/dev/null 2>&1"; then
-              docker exec srs-staging sh -c "busybox wget -S -O- -T 5 http://$gateway:19090/ 2>&1 || true"
-            else
-              echo "container_http_client=absent"
-              echo "testing_tcp_from_host_to_relay_bind=$gateway:19090"
-              timeout 5 bash -c "</dev/tcp/$gateway/19090" && echo "relay_tcp_reachable=true" || echo "relay_tcp_reachable=false"
-            fi
-          fi
+          echo "=== relay tcp ==="
+          timeout 5 bash -c "</dev/tcp/$gateway/19090" && echo "relay_tcp_reachable=true" || echo "relay_tcp_reachable=false"
 
           echo "=== controlled on_publish probe ==="
           probe='{"action":"on_publish","client_id":"tanbo-diagnostic","ip":"127.0.0.1","vhost":"staging.tanbo.internal","app":"live","stream":"unauthorized-diagnostic","param":""}'
-          set +e
           probe_code="$(curl -sS --max-time 15 -o /tmp/tanbo-probe-body -w '%{http_code}' -H 'Content-Type: application/json' --data-binary "$probe" "http://$gateway:19090/on-publish")"
-          probe_rc=$?
-          set -e
-          echo "relay_probe_curl_exit=$probe_rc"
           echo "relay_probe_http=$probe_code"
           echo -n "relay_probe_body="
           head -c 300 /tmp/tanbo-probe-body 2>/dev/null | tr '\n\r' '  ' || true
           echo
-          echo "expected_for_unauthorized=non-200-or-nonzero"
 
           echo "=== actual unauthorized WHIP through staging SRS ==="
           before_srs="$(docker logs srs-staging 2>&1 | wc -l)"
-          before_relay="$(journalctl -u tanbo-staging-relay.service --no-pager 2>/dev/null | wc -l)"
           whip_stream="unauthorized-whip-diagnostic"
-          sdp=          journalctl -u tanbo-staging-relay.service -n 80 --no-pager 2>&1 || true
-
-          echo "=== recent staging SRS hook-related logs ==="
-          docker logs --tail 160 srs-staging 2>&1 | grep -E 'on_publish|on_unpublish|http_hooks|19090|hook|failed|WHIP|whip' || true
-
-          echo "=== public exposure guard ==="
-          if ss -ltn | grep -Eq '(^|[[:space:]])(0\.0\.0\.0|\[::\]):19090'; then
-            echo "relay_public_listener=true"
-          else
-            echo "relay_public_listener=false"
-          fi
-          echo "diagnostics_complete=true"
-          REMOTE
-v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\nc=IN IP4 0.0.0.0\r\na=mid:0\r\na=sendonly\r\na=rtcp-mux\r\na=ice-ufrag:test\r\na=ice-pwd:testtesttesttesttesttest\r\na=fingerprint:sha-256 00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00\r\na=setup:actpass\r\na=rtpmap:111 opus/48000/2\r\n'
-          set +e
-          whip_code="$(curl -sS --max-time 12 -o /tmp/tanbo-whip-body -w '%{http_code}' -H 'Content-Type: application/sdp' --data-binary "$sdp" "http://127.0.0.1:1986/rtc/v1/whip/?app=live&stream=$whip_stream&vhost=staging.tanbo.internal")"
+          sdp_file=/tmp/tanbo-diagnostic.sdp
+          cat > "$sdp_file" <<'SDP'
+v=0
+o=- 0 0 IN IP4 127.0.0.1
+s=-
+t=0 0
+a=group:BUNDLE 0
+m=audio 9 UDP/TLS/RTP/SAVPF 111
+c=IN IP4 0.0.0.0
+a=mid:0
+a=sendonly
+a=rtcp-mux
+a=ice-ufrag:test
+a=ice-pwd:testtesttesttesttesttest
+a=fingerprint:sha-256 00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00
+a=setup:actpass
+a=rtpmap:111 opus/48000/2
+SDP
+          whip_code="$(curl -sS --max-time 12 -o /tmp/tanbo-whip-body -w '%{http_code}' -H 'Content-Type: application/sdp' --data-binary @"$sdp_file" "http://127.0.0.1:1986/rtc/v1/whip/?app=live&stream=$whip_stream&vhost=staging.tanbo.internal")"
           whip_rc=$?
-          set -e
           sleep 2
           echo "whip_curl_exit=$whip_rc"
           echo "whip_http=$whip_code"
@@ -108,21 +86,16 @@ v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0\r\nm=audio 9
           echo
           echo "=== SRS lines produced by WHIP probe ==="
           docker logs srs-staging 2>&1 | tail -n +$((before_srs + 1)) | grep -E "$whip_stream|on_publish|http_hooks|hook|failed|WHIP|whip|disconnect|close" || true
-          echo "=== relay lines produced by WHIP probe ==="
-          journalctl -u tanbo-staging-relay.service --no-pager 2>/dev/null | tail -n +$((before_relay + 1)) || true
+
+          echo "=== recent relay journal ==="
+          journalctl -u tanbo-staging-relay.service -n 80 --no-pager 2>&1 || true
+
           if [ "$whip_code" = "200" ] || [ "$whip_code" = "201" ]; then
             echo "unauthorized_whip_accepted=true"
           else
             echo "unauthorized_whip_accepted=false"
           fi
 
-          echo "=== recent relay journal ==="
-          journalctl -u tanbo-staging-relay.service -n 80 --no-pager 2>&1 || true
-
-          echo "=== recent staging SRS hook-related logs ==="
-          docker logs --tail 160 srs-staging 2>&1 | grep -E 'on_publish|on_unpublish|http_hooks|19090|hook|failed|WHIP|whip' || true
-
-          echo "=== public exposure guard ==="
           if ss -ltn | grep -Eq '(^|[[:space:]])(0\.0\.0\.0|\[::\]):19090'; then
             echo "relay_public_listener=true"
           else
