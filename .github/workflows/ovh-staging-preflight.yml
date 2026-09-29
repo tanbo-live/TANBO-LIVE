@@ -65,6 +65,19 @@ jobs:
             fi
           fi
 
+          echo "=== controlled on_publish probe ==="
+          probe='{"action":"on_publish","client_id":"tanbo-diagnostic","ip":"127.0.0.1","vhost":"staging.tanbo.internal","app":"live","stream":"unauthorized-diagnostic","param":""}'
+          set +e
+          probe_code="$(curl -sS --max-time 15 -o /tmp/tanbo-probe-body -w '%{http_code}' -H 'Content-Type: application/json' --data-binary "$probe" "http://$gateway:19090/on-publish")"
+          probe_rc=$?
+          set -e
+          echo "relay_probe_curl_exit=$probe_rc"
+          echo "relay_probe_http=$probe_code"
+          echo -n "relay_probe_body="
+          head -c 300 /tmp/tanbo-probe-body 2>/dev/null | tr '\n\r' '  ' || true
+          echo
+          echo "expected_for_unauthorized=non-200-or-nonzero"
+
           echo "=== recent relay journal ==="
           journalctl -u tanbo-staging-relay.service -n 80 --no-pager 2>&1 || true
 
