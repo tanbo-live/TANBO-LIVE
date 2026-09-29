@@ -1,8 +1,20 @@
 name: OVH Staging Preflight
+run-name: OVH Staging Preflight — ${{ github.event_name }}
+
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/ovh-staging-preflight.yml"
+
+permissions:
+  contents: read
+
 jobs:
-  fix-staging-hook-path:
+  staging-diagnostics:
+    name: Read-only staging diagnostics
     runs-on: ubuntu-latest
     steps:
       - name: Configure SSH
@@ -14,81 +26,48 @@ jobs:
           printf '%s\n' "$OVH_SSH_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -H "$OVH_HOST" >> ~/.ssh/known_hosts
-      - name: Make relay reachable only from staging Docker bridge
+
+      - name: Inspect staging relay and SRS without changing anything
         env:
           OVH_HOST: ${{ secrets.OVH_HOST }}
           OVH_USER: ${{ secrets.OVH_USER }}
         run: |
           ssh -i ~/.ssh/id_ed25519 "$OVH_USER@$OVH_HOST" "sudo bash -s" <<'REMOTE'
-          set -euo pipefail
-          test "$(docker inspect -f '{{.State.Running}}' srs)" = true
-          test "$(docker inspect -f '{{.State.Running}}' srs-staging)" = true
-          systemctl is-active --quiet tanbo-staging-relay.service
-
-          gateway="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.Gateway}}{{end}}' srs-staging)"
-          test -n "$gateway"
-          echo "staging_gateway=$gateway"
-
-          unit=/etc/systemd/system/tanbo-staging-relay.service
-          relay=/opt/tanbo-staging-relay/relay.py
-          grep -q 'ThreadingHTTPServer' "$relay"
-          cp -a "$relay" "$relay.bak-before-docker-bind"
-          cp -a "$unit" "$unit.bak-before-docker-bind"
-
-          python3 - "$relay" "$gateway" <<'PY'
-import pathlib,re,sys
-p=pathlib.Path(sys.argv[1]); gw=sys.argv[2]
-s=p.read_text()
-desired=f'ThreadingHTTPServer(("{gw}", 19090)'
-if desired in s:
-    print("relay_bind_already_correct=true")
-else:
-    new,n=re.subn(r'ThreadingHTTPServer\(\(\s*["\x27]127\.0\.0\.1["\x27]\s*,\s*19090\s*\)', desired, s, count=1)
-    if n != 1:
-        raise SystemExit("relay bind is neither loopback nor expected staging gateway; refusing to guess")
-    p.write_text(new)
-    print("relay_bind_updated=true")
-PY
-          python3 -m py_compile "$relay"
-          systemctl daemon-reload
-          systemctl restart tanbo-staging-relay.service
-          sleep 2
-          systemctl is-active --quiet tanbo-staging-relay.service
-          ss -ltn | grep -q "$gateway:19090"
-          if ss -ltn | grep -q '0.0.0.0:19090'; then echo "relay became public" >&2; exit 1; fi
-
-          cfg=/opt/srs-staging/tanbo-staging.conf
-          cp -a "$cfg" "$cfg.bak-before-relay-gateway"
-          if grep -q 'http://127\.0\.0\.1:19090/' "$cfg"; then
-            sed -i "s#http://127\.0\.0\.1:19090/#http://$gateway:19090/#g" "$cfg"
-          fi
-          grep -q "on_publish http://$gateway:19090/on-publish" "$cfg"
-          grep -q "on_unpublish http://$gateway:19090/on-unpublish" "$cfg"
-
-          docker restart srs-staging >/dev/null
-          sleep 2
-          test "$(docker inspect -f '{{.State.Running}}' srs-staging)" = true
-          test "$(docker inspect -f '{{.State.Running}}' srs)" = true
-
-          before="$(docker logs srs-staging 2>&1 | wc -l)"
-          sdp=$'v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\nc=IN IP4 0.0.0.0\r\na=mid:0\r\na=sendonly\r\na=rtcp-mux\r\na=ice-ufrag:test\r\na=ice-pwd:testtesttesttesttesttest\r\na=fingerprint:sha-256 00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00\r\na=setup:actpass\r\na=rtpmap:111 opus/48000/2\r\n'
           set +e
-          code="$(curl -sS --max-time 12 -o /tmp/whip-body -w '%{http_code}' -H 'Content-Type: application/sdp' --data-binary "$sdp" 'http://127.0.0.1:1986/rtc/v1/whip/?app=live&stream=unauthorized-root-proof&vhost=staging.tanbo.internal')"
-          rc=$?
-          set -e
-          sleep 2
-          echo "whip_http_code=$code curl_exit=$rc"
-          recent="$(docker logs srs-staging 2>&1 | tail -n +$((before + 1)))"
-          printf '%s\n' "$recent" | grep -E 'unauthorized-root-proof|on_publish|http_hooks|19090|failed' || true
-          printf '%s\n' "$recent" | grep -q 'unauthorized-root-proof'
-          printf '%s\n' "$recent" | grep -q 'on_publish'
-          if printf '%s\n' "$recent" | grep -q 'connect server failed'; then
-            echo "SRS still cannot reach relay" >&2; exit 1
+          echo "=== containers ==="
+          docker inspect -f 'production_srs_running={{.State.Running}}' srs 2>&1
+          docker inspect -f 'staging_srs_running={{.State.Running}}' srs-staging 2>&1
+
+          echo "=== staging docker network ==="
+          gateway="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.Gateway}}{{end}}' srs-staging 2>/dev/null)"
+          container_ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' srs-staging 2>/dev/null)"
+          echo "staging_gateway=$gateway"
+          echo "staging_container_ip=$container_ip"
+
+          echo "=== relay service/listener ==="
+          systemctl is-active tanbo-staging-relay.service 2>&1
+          ss -ltnp | grep ':19090' || true
+          grep -n 'ThreadingHTTPServer' /opt/tanbo-staging-relay/relay.py 2>/dev/null || true
+
+          echo "=== staging hooks ==="
+          grep -n -A8 -B2 'http_hooks' /opt/srs-staging/tanbo-staging.conf 2>/dev/null || true
+
+          echo "=== relay reachability from staging container ==="
+          if [ -n "$gateway" ]; then
+            docker exec srs-staging sh -c "wget -S -O- -T 5 http://$gateway:19090/ 2>&1 || true" || true
           fi
-          if [ "$code" = "201" ] || [ "$code" = "200" ]; then
-            echo "unauthorized WHIP was accepted" >&2; exit 1
+
+          echo "=== recent relay journal ==="
+          journalctl -u tanbo-staging-relay.service -n 80 --no-pager 2>&1 || true
+
+          echo "=== recent staging SRS hook-related logs ==="
+          docker logs --tail 160 srs-staging 2>&1 | grep -E 'on_publish|on_unpublish|http_hooks|19090|hook|failed|WHIP|whip' || true
+
+          echo "=== public exposure guard ==="
+          if ss -ltn | grep -Eq '(^|[[:space:]])(0\.0\.0\.0|\[::\]):19090'; then
+            echo "relay_public_listener=true"
+          else
+            echo "relay_public_listener=false"
           fi
-          echo "relay_bridge_bind=true"
-          echo "production_srs_untouched=true"
-          echo "root_fix_verified=true"
+          echo "diagnostics_complete=true"
           REMOTE
