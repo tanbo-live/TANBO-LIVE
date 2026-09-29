@@ -61,38 +61,31 @@ jobs:
           sdp_file=/tmp/tanbo-diagnostic.sdp
           printf '%s\\r\\n' \
             'v=0' \
-            'o=- 8155286585472813923 1679356492 IN IP4 0.0.0.0' \
-            's=-' \
-            't=0 0' \
-            'a=fingerprint:sha-256 70:C7:51:C8:37:57:54:F0:2A:4A:A8:B5:78:59:55:8E:DC:E8:60:4E:81:ED:6F:BA:D0:C8:4B:40:FA:11:7C:CC' \
-            'a=ice-lite' \
-            'a=extmap-allow-mixed' \
             'a=group:BUNDLE 0 1' \
-            'm=video 9 UDP/TLS/RTP/SAVPF 97 98' \
-            'c=IN IP4 0.0.0.0' \
-            'a=setup:actpass' \
-            'a=mid:0' \
-            'a=ice-ufrag:gvJoSLvvsgHgCAnj' \
-            'a=ice-pwd:PoDmihiESWHpaBeyieudWrIoOEtywnqZ' \
-            'a=rtcp-mux' \
-            'a=rtcp-rsize' \
-            'a=rtpmap:97 H264/90000' \
-            'a=rtcp-fb:97 goog-remb' \
-            'a=rtcp-fb:97 transport-cc' \
-            'a=rtcp-fb:97 ccm fir' \
-            'a=rtcp-fb:97 nack' \
-            'a=rtcp-fb:97 nack pli' \
-            'a=fmtp:97 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f' \
-            'a=rtpmap:98 rtx/90000' \
-            'a=fmtp:98 apt=97' \
             'm=audio 9 UDP/TLS/RTP/SAVPF 111' \
             'c=IN IP4 0.0.0.0' \
+            'a=rtcp:9 IN IP4 0.0.0.0' \
+            'a=ice-ufrag:J8X7' \
+            'a=ice-pwd:Dpq7/fW/osYcPeLsCW2Ek1JH' \
+            'a=setup:actpass' \
+            'a=mid:0' \
+            'a=sendonly' \
+            'a=msid:- audio' \
+            'a=rtcp-mux' \
+            'a=rtpmap:111 opus/48000/2' \
+            'a=ssrc:3184534672 cname:stream' \
+            'm=video 9 UDP/TLS/RTP/SAVPF 106' \
+            'c=IN IP4 0.0.0.0' \
+            'a=rtcp:9 IN IP4 0.0.0.0' \
+            'a=ice-ufrag:J8X7' \
+            'a=ice-pwd:Dpq7/fW/osYcPeLsCW2Ek1JH' \
             'a=setup:actpass' \
             'a=mid:1' \
-            'a=ice-ufrag:gvJoSLvvsgHgCAnj' \
-            'a=ice-pwd:PoDmihiESWHpaBeyieudWrIoOEtywnqZ' \
+            'a=sendonly' \
+            'a=msid:- video' \
             'a=rtcp-mux' \
-            'a=rtpmap:111 opus/48000/2' > "$sdp_file"
+            'a=rtpmap:106 H264/90000' \
+            'a=ssrc:512761356 cname:stream' > "$sdp_file"
           whip_code="$(curl -sS --max-time 12 -o /tmp/tanbo-whip-body -w '%{http_code}' -H 'Content-Type: application/sdp' --data-binary @"$sdp_file" "http://127.0.0.1:1986/rtc/v1/whip/?app=live&stream=$whip_stream&vhost=staging.tanbo.internal")"
           whip_rc=$?
           sleep 2
