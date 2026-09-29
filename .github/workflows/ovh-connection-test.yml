@@ -35,10 +35,16 @@ jobs:
           else
             echo 'SRS config not readable'
           fi
+          echo SRS_CONFIG
+          sed -n '1,180p' /opt/srs/tanbo.conf 2>/dev/null || true
+          echo DOCKER_BINDINGS
+          docker inspect srs --format '{{json .HostConfig.PortBindings}}' 2>/dev/null || true
+          echo DOCKER_MOUNTS
+          docker inspect srs --format '{{json .Mounts}}' 2>/dev/null || true
           echo LISTENING_PORTS
           ss -lntup 2>/dev/null | grep -E ':(1935|1985|8080|8000)[[:space:]]' || true
           echo FIREWALL_STATUS
-          ufw status 2>/dev/null || true
+          ufw status verbose 2>/dev/null || true
           echo NGINX_PROXY_ROUTES
           nginx -T 2>/dev/null | grep -E 'location |proxy_pass|listen ' | head -120 || true
           echo SRS_LOG_TAIL
