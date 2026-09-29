@@ -2,7 +2,7 @@ name: OVH Staging Preflight
 on:
   workflow_dispatch:
 jobs:
-  staging-relay-prep:
+  staging-https:
     runs-on: ubuntu-latest
     steps:
       - name: Configure SSH
@@ -14,50 +14,42 @@ jobs:
           printf '%s\n' "$OVH_SSH_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -H "$OVH_HOST" >> ~/.ssh/known_hosts
-      - name: Prepare relay skeleton without secrets or public routing
+      - name: Configure isolated staging HTTPS
         env:
           OVH_HOST: ${{ secrets.OVH_HOST }}
           OVH_USER: ${{ secrets.OVH_USER }}
         run: |
           ssh -i ~/.ssh/id_ed25519 "$OVH_USER@$OVH_HOST" "sudo bash -s" <<'REMOTE'
           set -euo pipefail
-          test "$(docker inspect -f '{{.State.Running}}' srs)" = "true"
-          test "$(docker inspect -f '{{.State.Running}}' srs-staging)" = "true"
-          install -d -m 700 /opt/tanbo-staging-relay
-          cat >/opt/tanbo-staging-relay/relay.py <<'PY'
-          import hashlib, hmac, http.server, os, time, urllib.request, urllib.error
-          KEY=os.environ.get("TANBO_SRS_HOOK_SIGNING_KEY","").encode()
-          TARGET=os.environ.get("TANBO_STAGING_API_ORIGIN","").rstrip("/")
-          class H(http.server.BaseHTTPRequestHandler):
-              def do_POST(self):
-                  if self.path not in ("/on-publish","/on-unpublish") or not KEY or not TARGET:
-                      self.send_response(503); self.end_headers(); return
-                  n=int(self.headers.get("Content-Length","0"))
-                  if n < 1 or n > 8192:
-                      self.send_response(413); self.end_headers(); return
-                  body=self.rfile.read(n)
-                  ts=str(int(time.time()))
-                  sig=hmac.new(KEY, ts.encode()+b"."+body, hashlib.sha256).hexdigest()
-                  suffix="/api/internal/srs/on-publish" if self.path=="/on-publish" else "/api/internal/srs/on-unpublish"
-                  req=urllib.request.Request(TARGET+suffix,data=body,method="POST",headers={
-                      "Content-Type":"application/json",
-                      "X-Tanbo-SRS-Timestamp":ts,
-                      "X-Tanbo-SRS-Signature":sig})
-                  try:
-                      with urllib.request.urlopen(req,timeout=5) as r:
-                          out=r.read(8192); code=r.status
-                  except urllib.error.HTTPError as e:
-                      code=e.code; out=e.read(8192)
-                  except Exception:
-                      code=503; out=b"hook unavailable"
-                  self.send_response(code); self.send_header("Content-Type","text/plain"); self.end_headers(); self.wfile.write(out)
-              def log_message(self, fmt, *args): pass
-          http.server.ThreadingHTTPServer(("127.0.0.1",19090),H).serve_forever()
-          PY
-          chmod 700 /opt/tanbo-staging-relay/relay.py
-          python3 -m py_compile /opt/tanbo-staging-relay/relay.py
-          echo "relay skeleton validated; not started because secrets/API origin are intentionally unset"
+          test "$(docker inspect -f '{{.State.Running}}' srs)" = true
+          test "$(docker inspect -f '{{.State.Running}}' srs-staging)" = true
+          getent ahostsv4 staging-live.tanbo.co.uk | grep -q '51.89.224.80' || { echo 'DNS not propagated yet'; exit 2; }
+          cp -a /etc/nginx /etc/nginx.tanbo-pre-staging-$(date +%Y%m%d%H%M%S)
+          cat >/etc/nginx/sites-available/tanbo-staging-live <<'NGINX'
+          server {
+              listen 80;
+              server_name staging-live.tanbo.co.uk;
+              location / {
+                  proxy_pass http://127.0.0.1:8081;
+                  proxy_http_version 1.1;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Forwarded-Proto $scheme;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+              }
+          }
+          NGINX
+          ln -sfn /etc/nginx/sites-available/tanbo-staging-live /etc/nginx/sites-enabled/tanbo-staging-live
+          nginx -t
+          systemctl reload nginx
+          if command -v certbot >/dev/null 2>&1; then
+            certbot --nginx -d staging-live.tanbo.co.uk --non-interactive --agree-tos --redirect --keep-until-expiring
+          else
+            echo 'certbot unavailable'; exit 3
+          fi
+          nginx -t
+          systemctl reload nginx
+          curl -fsS --max-time 10 https://staging-live.tanbo.co.uk/ >/dev/null
+          echo 'staging HTTPS healthy'
           echo "production_srs=$(docker inspect -f '{{.State.Running}}' srs)"
           echo "staging_srs=$(docker inspect -f '{{.State.Running}}' srs-staging)"
-          ss -lnt | grep ':19090 ' && exit 1 || true
           REMOTE
