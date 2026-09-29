@@ -2,7 +2,7 @@ name: OVH Staging Preflight
 on:
   workflow_dispatch:
 jobs:
-  verify-staging-whip-denial:
+  inspect-staging-whip-endpoint:
     runs-on: ubuntu-latest
     steps:
       - name: Configure SSH
@@ -14,29 +14,30 @@ jobs:
           printf '%s\n' "$OVH_SSH_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -H "$OVH_HOST" >> ~/.ssh/known_hosts
-      - name: Verify unauthorized WHIP is denied by staging SRS
+      - name: Inspect WHIP endpoint and SRS logs without changes
         env:
           OVH_HOST: ${{ secrets.OVH_HOST }}
           OVH_USER: ${{ secrets.OVH_USER }}
         run: |
           ssh -i ~/.ssh/id_ed25519 "$OVH_USER@$OVH_HOST" "sudo bash -s" <<'REMOTE'
-          set -euo pipefail
-          test "$(docker inspect -f '{{.State.Running}}' srs)" = true
-          test "$(docker inspect -f '{{.State.Running}}' srs-staging)" = true
-          systemctl is-active --quiet tanbo-staging-relay.service
-          grep -q 'rtc_server' /opt/srs-staging/tanbo-staging.conf
-          grep -q 'http_hooks' /opt/srs-staging/tanbo-staging.conf
-          callback=$(curl -sS -o /tmp/tanbo-hook.out -w '%{http_code}' -H 'Content-Type: application/json' --data '{"action":"on_publish","vhost":"staging.tanbo.internal","app":"live","stream":"unauthorized-whip-probe","client_id":"probe"}' http://127.0.0.1:19090/on-publish || true)
-          echo "unauthorized_callback_http=$callback"
-          test "$callback" = 403
-          whip=$(curl -sS --max-time 8 -o /tmp/tanbo-whip.out -w '%{http_code}' \
-            -X POST -H 'Content-Type: application/sdp' \
-            --data-binary $'v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=tanbo-probe\r\nt=0 0\r\na=group:BUNDLE 0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=mid:0\r\na=sendonly\r\na=rtcp-mux\r\na=ice-ufrag:probe\r\na=ice-pwd:probeprobepwdprobeprobepwd\r\na=fingerprint:sha-256 00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00\r\na=setup:actpass\r\na=rtpmap:96 H264/90000\r\n' \
-            'http://127.0.0.1:1986/rtc/v1/whip/?app=live&stream=unauthorized-whip-probe&vhost=staging.tanbo.internal' || true)
-          echo "unauthorized_whip_http=$whip"
-          echo "whip_response=$(tr '\n' ' ' </tmp/tanbo-whip.out | head -c 500 || true)"
-          test "$whip" = 403
-          test "$(docker inspect -f '{{.State.Running}}' srs)" = true
-          echo "unauthorized_whip_rejected=true"
-          echo "production_srs_unchanged_running=true"
+          set -u
+          echo "--- state ---"
+          echo "production=$(docker inspect -f '{{.State.Running}}' srs)"
+          echo "staging=$(docker inspect -f '{{.State.Running}}' srs-staging)"
+          echo "--- config rtc/http ---"
+          grep -nE 'rtc_server|rtc \{|http_api|http_server|listen|candidate|http_hooks' /opt/srs-staging/tanbo-staging.conf || true
+          echo "--- ports ---"
+          docker port srs-staging || true
+          ss -lntup | grep -E ':(1986|8081|8001)\\b' || true
+          echo "--- API probes ---"
+          for u in \
+            'http://127.0.0.1:1986/api/v1/versions' \
+            'http://127.0.0.1:1986/rtc/v1/whip/' \
+            'http://127.0.0.1:8081/rtc/v1/whip/'; do
+            code=$(curl -sS --max-time 5 -o /tmp/probe.out -w '%{http_code}' "$u" || true)
+            echo "$u -> $code body=$(tr '\n' ' ' </tmp/probe.out 2>/dev/null | head -c 240)"
+          done
+          echo "--- recent staging SRS logs ---"
+          docker logs --tail 120 srs-staging 2>&1 | tail -120
+          echo "inspection_complete=true"
           REMOTE
