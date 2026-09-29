@@ -2,7 +2,7 @@ name: OVH Staging Preflight
 on:
   workflow_dispatch:
 jobs:
-  enable-staging-rtc:
+  verify-staging-whip-denial:
     runs-on: ubuntu-latest
     steps:
       - name: Configure SSH
@@ -14,7 +14,7 @@ jobs:
           printf '%s\n' "$OVH_SSH_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -H "$OVH_HOST" >> ~/.ssh/known_hosts
-      - name: Enable isolated RTC on staging SRS only
+      - name: Verify unauthorized WHIP is denied by staging SRS
         env:
           OVH_HOST: ${{ secrets.OVH_HOST }}
           OVH_USER: ${{ secrets.OVH_USER }}
@@ -22,38 +22,21 @@ jobs:
           ssh -i ~/.ssh/id_ed25519 "$OVH_USER@$OVH_HOST" "sudo bash -s" <<'REMOTE'
           set -euo pipefail
           test "$(docker inspect -f '{{.State.Running}}' srs)" = true
-          cp -a /opt/srs-staging/tanbo-staging.conf /opt/srs-staging/tanbo-staging.conf.pre-rtc
-          python3 - <<'PY'
-          from pathlib import Path
-          p=Path('/opt/srs-staging/tanbo-staging.conf')
-          s=p.read_text()
-          if 'rtc_server {' not in s:
-              marker='vhost staging.tanbo.internal {'
-              s=s.replace(marker, 'rtc_server {\n    enabled on;\n    listen 8001;\n    candidate 51.89.224.80;\n}\n\n'+marker)
-          if 'rtc {' not in s:
-              marker='    hls {'
-              s=s.replace(marker, '    rtc {\n        enabled on;\n        rtmp_to_rtc on;\n        rtc_to_rtmp on;\n    }\n\n'+marker)
-          p.write_text(s)
-          PY
-          docker rm -f srs-staging
-          docker run -d --name srs-staging --restart unless-stopped \
-            -p 127.0.0.1:1936:1935/tcp \
-            -p 127.0.0.1:1986:1985/tcp \
-            -p 127.0.0.1:8081:8080/tcp \
-            -p 8001:8001/udp \
-            -v /opt/srs-staging/tanbo-staging.conf:/usr/local/srs/conf/tanbo-staging.conf:ro \
-            ossrs/srs:6 ./objs/srs -c conf/tanbo-staging.conf
-          sleep 3
           test "$(docker inspect -f '{{.State.Running}}' srs-staging)" = true
-          test "$(docker inspect -f '{{.State.Running}}' srs)" = true
           systemctl is-active --quiet tanbo-staging-relay.service
           grep -q 'rtc_server' /opt/srs-staging/tanbo-staging.conf
-          grep -q 'listen 8001;' /opt/srs-staging/tanbo-staging.conf
-          ss -lun | grep -q ':8001'
-          # Keep staging RTC inaccessible externally until authorization behavior is proven.
-          ufw deny 8001/udp >/dev/null || true
-          echo "staging_rtc_enabled=true"
-          echo "staging_rtc_udp=8001"
-          echo "staging_rtc_external=blocked"
-          echo "production_srs=$(docker inspect -f '{{.State.Running}}' srs)"
+          grep -q 'http_hooks' /opt/srs-staging/tanbo-staging.conf
+          callback=$(curl -sS -o /tmp/tanbo-hook.out -w '%{http_code}' -H 'Content-Type: application/json' --data '{"action":"on_publish","vhost":"staging.tanbo.internal","app":"live","stream":"unauthorized-whip-probe","client_id":"probe"}' http://127.0.0.1:19090/on-publish || true)
+          echo "unauthorized_callback_http=$callback"
+          test "$callback" = 403
+          whip=$(curl -sS --max-time 8 -o /tmp/tanbo-whip.out -w '%{http_code}' \
+            -X POST -H 'Content-Type: application/sdp' \
+            --data-binary $'v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=tanbo-probe\r\nt=0 0\r\na=group:BUNDLE 0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=mid:0\r\na=sendonly\r\na=rtcp-mux\r\na=ice-ufrag:probe\r\na=ice-pwd:probeprobepwdprobeprobepwd\r\na=fingerprint:sha-256 00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00\r\na=setup:actpass\r\na=rtpmap:96 H264/90000\r\n' \
+            'http://127.0.0.1:1986/rtc/v1/whip/?app=live&stream=unauthorized-whip-probe&vhost=staging.tanbo.internal' || true)
+          echo "unauthorized_whip_http=$whip"
+          echo "whip_response=$(tr '\n' ' ' </tmp/tanbo-whip.out | head -c 500 || true)"
+          test "$whip" = 403
+          test "$(docker inspect -f '{{.State.Running}}' srs)" = true
+          echo "unauthorized_whip_rejected=true"
+          echo "production_srs_unchanged_running=true"
           REMOTE
