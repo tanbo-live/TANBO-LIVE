@@ -55,7 +55,21 @@ jobs:
           head -c 300 /tmp/tanbo-probe-body 2>/dev/null | tr '\n\r' '  ' || true
           echo
 
-          echo "=== staging WHIP routing/config diagnostics ==="\n          echo "staging_srs_version=$(docker exec srs-staging /usr/local/srs/objs/srs -v 2>&1 | head -n 1 || true)"\n          echo "--- staging published ports ---"\n          docker port srs-staging 2>&1 || true\n          echo "--- staging rtc/whip config ---"\n          grep -n -E "^(listen|http_api|http_server|rtc_server)|enabled|listen|candidate|vhost|rtc|http_hooks" /opt/srs-staging/tanbo-staging.conf 2>/dev/null || true\n          echo "--- nginx staging-live routes ---"\n          nginx -T 2>/dev/null | grep -n -A12 -B5 -E "staging-live|rtc/v1/whip|1986|8081" || true\n          echo "--- local endpoint status (no publish) ---"\n          for u in "http://127.0.0.1:1986/api/v1/versions" "http://127.0.0.1:1986/rtc/v1/whip/" "http://127.0.0.1:8081/"; do code=$(curl -sS --max-time 5 -o /tmp/tanbo-route-body -w "%{http_code}" "$u" || true); echo "$u -> $code"; done\n\n          echo "=== actual unauthorized WHIP through staging SRS ==="
+          echo "=== staging WHIP routing/config diagnostics ==="
+          echo "staging_srs_version=$(docker exec srs-staging /usr/local/srs/objs/srs -v 2>&1 | head -n 1 || true)"
+          echo "--- staging published ports ---"
+          docker port srs-staging 2>&1 || true
+          echo "--- staging rtc/whip config ---"
+          grep -n -E '^(listen|http_api|http_server|rtc_server)|enabled|listen|candidate|vhost|rtc|http_hooks' /opt/srs-staging/tanbo-staging.conf 2>/dev/null || true
+          echo "--- nginx staging-live routes ---"
+          nginx -T 2>/dev/null | grep -n -A12 -B5 -E 'staging-live|rtc/v1/whip|1986|8081' || true
+          echo "--- local endpoint status (no publish) ---"
+          for u in "http://127.0.0.1:1986/api/v1/versions" "http://127.0.0.1:1986/rtc/v1/whip/" "http://127.0.0.1:8081/"; do
+            code=$(curl -sS --max-time 5 -o /tmp/tanbo-route-body -w '%{http_code}' "$u" || true)
+            echo "$u -> $code"
+          done
+
+          echo "=== actual unauthorized WHIP through staging SRS ==="
           before_srs="$(docker logs srs-staging 2>&1 | wc -l)"
           whip_stream="unauthorized-whip-diagnostic"
           sdp_file=/tmp/tanbo-diagnostic.sdp
