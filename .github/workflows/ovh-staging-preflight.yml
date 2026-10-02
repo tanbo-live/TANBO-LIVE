@@ -139,5 +139,12 @@ jobs:
           echo "--- staging nginx recent access/error ---"
           tail -n 120 /var/log/nginx/access.log 2>/dev/null | grep -E 'staging-live|rtc|whip|whep|m3u8|\\.ts' || true
           tail -n 100 /var/log/nginx/error.log 2>/dev/null || true
+          echo "--- active test stream deep trace ---"
+          docker logs --since 30m srs-staging 2>&1 | grep -F 'tanbo-test-7a9953dac9dc731ba0d1920debd99de1eb5e99d5d1d935b12547079e6a35df58' | tail -n 160 || true
+          echo "--- UDP 8001 / firewall snapshot ---"
+          ss -lunp | grep ':8001' || true
+          ufw status verbose 2>&1 || true
+          iptables -S 2>/dev/null | grep -E '8001|DOCKER' | head -n 120 || true
+          iptables -t nat -S 2>/dev/null | grep '8001' || true
           echo "diagnostics_complete=true"
           REMOTE
