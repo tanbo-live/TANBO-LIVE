@@ -146,5 +146,12 @@ jobs:
           ufw status verbose 2>&1 || true
           iptables -S 2>/dev/null | grep -E '8001|DOCKER' | head -n 120 || true
           iptables -t nat -S 2>/dev/null | grep '8001' || true
+          echo "=== staging-only root fix: allow dedicated WebRTC UDP 8001 ==="
+          ufw delete deny 8001/udp 2>/dev/null || true
+          ufw allow 8001/udp
+          echo "--- verify staging UDP rule/listener ---"
+          ufw status | grep -E '8000/udp|8001/udp' || true
+          ss -lunp | grep ':8001' || true
+          echo "staging_udp_8001_fix_applied=true"
           echo "diagnostics_complete=true"
           REMOTE
