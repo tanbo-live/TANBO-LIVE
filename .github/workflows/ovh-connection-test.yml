@@ -46,6 +46,17 @@ jobs:
           echo SECURITY_READINESS\n          echo 'Firewall activation and port restriction require an approved infrastructure change.'\n          echo FIREWALL_STATUS\n          ufw status verbose 2>/dev/null || true
           echo NGINX_PROXY_ROUTES
           nginx -T 2>/dev/null | grep -E 'location |proxy_pass|listen ' | head -120 || true
+          echo CURRENT_PRODUCTION_SECURITY_SNAPSHOT
+          date -u '+snapshot_utc=%Y-%m-%dT%H:%M:%SZ'
+          echo SRS_HOOKS_CURRENT
+          grep -n -A12 -B3 -E 'http_hooks|on_publish|on_unpublish' /opt/srs/tanbo.conf 2>/dev/null || true
+          echo FIREWALL_CURRENT
+          ufw status verbose 2>/dev/null || true
+          echo PUBLIC_BINDINGS_CURRENT
+          docker port srs 2>/dev/null || true
+          echo ACTIVE_STREAMS_CURRENT
+          curl -sS --max-time 5 http://127.0.0.1:1985/api/v1/streams/ || true
+          echo
           echo SRS_LOG_TAIL
           docker logs --tail 80 srs 2>&1 || true
           REMOTE
